@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bidradar-x"
+version = "0.1.0"
+description = "Evidence-first tender monitoring MVP for the xFusion challenge"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "apscheduler>=3.10,<4",
+  "beautifulsoup4>=4.12",
+  "fastapi>=0.115",
+  "httpx>=0.27",
+  "lxml>=5.3",
+  "pydantic>=2.10",
+  "python-docx>=1.1",
+  "python-multipart>=0.0.18",
+  "sqlalchemy>=2.0",
+  "streamlit>=1.41",
+  "uvicorn[standard]>=0.34",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.14",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "ruff>=0.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["bidradar"]
+ignore_missing_imports = true
+

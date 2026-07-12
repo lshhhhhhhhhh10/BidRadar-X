@@ -1,0 +1,48 @@
+name: 功能任务
+description: 一个可独立验收的小功能
+title: "[功能] "
+labels: ["status:ready"]
+body:
+  - type: dropdown
+    id: owner
+    attributes:
+      label: 负责人
+      options: ["A-数据科学/产品", "B-软件工程/平台", "S-双方"]
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 一句话描述用户可观察行为，不写实现口号。
+    validations:
+      required: true
+  - type: textarea
+    id: io
+    attributes:
+      label: 输入与输出
+      placeholder: "输入：\n输出："
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 必须可测试，包含命令、样例或指标。
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 依赖与非目标
+      placeholder: "依赖：\n非目标："
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 安全确认
+      options:
+        - label: 不访问未授权登录源，不绕过验证码或风控
+          required: true
+        - label: 测试和 CI 只使用 fixture
+          required: true
+
