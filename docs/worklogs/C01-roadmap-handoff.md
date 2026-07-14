@@ -182,6 +182,17 @@ README/TEAM_HANDOFF 冷启动黑盒逐项结果：
 
 提交不能在自身内容中写入自己的最终 SHA（写入会改变 SHA）；本日志用分支 tip、提交主题和验证命令唯一标识，最终 C01 回执报告准确本地/远端 SHA。
 
+实际发布结果：
+
+- C01 主文档提交：`2d4c49e2c09cdd21fd3daf15511daea4bc67a0f0`，主题 `docs: reconcile roadmap and team handoff`。
+- `git push -u origin recovery/c01-local-project-20260715` 成功，upstream 设置为同名远端分支。
+- 首次发布比对：本地 SHA 与 `git ls-remote` 远端 SHA 都是 `2d4c49e2c09cdd21fd3daf15511daea4bc67a0f0`。
+- 远端 `main` 仍为 `37a87bb95770c56daac8282f111ea9a97d3ba15c`；再次检查仍无 merge-base，未覆盖远端原历史。
+- 从真实 URL 和恢复分支克隆到全新临时目录成功；分支正确、SHA 为 `2d4c49e2...`，README 与五份核心交接文档 6/6 存在，工作区干净并跟踪远端。
+- C01 没有创建 PR：恢复历史与 `main` 不相关，GitHub 自动给出的 compare 入口不能替代可比较的 PR。后续同源 feature 分支可以把恢复分支作为 base 建 Draft PR。
+- GitHub connector 读取仓库仍返回 404、collaborator permission 返回空；认证 Git 读写和 fresh clone 成功。可见性推测为私有，维护级权限和队友 collaborator 状态仍无法可靠确认。
+- 本段作为发布审计追加提交后，再次 push 并以分支最终 tip 做 SHA 比对；最终 tip 由 C01 完成回执报告。
+
 ## 未完成项
 
 - R01 及后续业务能力均未在 C01 中实现。
