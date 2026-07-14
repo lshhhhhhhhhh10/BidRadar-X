@@ -113,3 +113,25 @@ class SubscriptionResponse(BaseModel):
 
 class SubscriptionListResponse(BaseModel):
     items: list[SubscriptionResponse]
+
+
+class NaturalLanguageSubscriptionCreateRequest(BaseModel):
+    query: str = Field(max_length=500)
+    timezone: str = "Asia/Shanghai"
+    max_retries: int = Field(default=3, ge=0, le=10)
+    retry_backoff_seconds: int = Field(default=30, ge=1, le=3600)
+
+
+class ScheduleIntentResponse(BaseModel):
+    frequency: Frequency
+    timezone: str
+    local_time: str
+    weekly_day: WeeklyDay | None
+    run_at: AwareDatetime | None
+    search_query: str
+    matched_text: str
+
+
+class NaturalLanguageSubscriptionCreateResponse(BaseModel):
+    subscription: SubscriptionResponse
+    parsed: ScheduleIntentResponse

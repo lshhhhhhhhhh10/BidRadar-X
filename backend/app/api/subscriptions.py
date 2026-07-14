@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Response, status
+from pydantic import ValidationError
 
 from ..schemas.task import (
+    NaturalLanguageSubscriptionCreateRequest,
+    NaturalLanguageSubscriptionCreateResponse,
     SubscriptionCreateRequest,
     SubscriptionListResponse,
     SubscriptionResponse,
 )
+from ..services.schedule_intent import ScheduleIntentError, ScheduleIntentParser
 from ..services.scheduler import LocalScheduler, SubscriptionService, SystemClock
 from ..storage.repository import Repository
 
@@ -23,21 +27,81 @@ def _service() -> SubscriptionService:
     )
 
 
+def _create_validated_subscription(
+    service: SubscriptionService,
+    request: SubscriptionCreateRequest,
+) -> dict:
+    if request.local_time is None:
+        raise ValueError("validated subscription request requires local_time")
+    return service.create(
+        query=request.query,
+        frequency=request.frequency,
+        timezone_name=request.timezone,
+        local_time=request.local_time,
+        weekly_day=request.weekly_day,
+        run_at=request.run_at,
+        max_retries=request.max_retries,
+        retry_backoff_seconds=request.retry_backoff_seconds,
+    )
+
+
 @router.post("", response_model=SubscriptionResponse, status_code=status.HTTP_201_CREATED)
 def create_subscription(request: SubscriptionCreateRequest) -> dict:
     try:
-        return _service().create(
-            query=request.query,
-            frequency=request.frequency,
-            timezone_name=request.timezone,
-            local_time=request.local_time or "09:00",
-            weekly_day=request.weekly_day,
-            run_at=request.run_at,
+        return _create_validated_subscription(_service(), request)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post(
+    "/from-query",
+    response_model=NaturalLanguageSubscriptionCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_subscription_from_query(
+    request: NaturalLanguageSubscriptionCreateRequest,
+) -> dict:
+    service = _service()
+    try:
+        intent = ScheduleIntentParser().parse(
+            request.query,
+            timezone=request.timezone,
+            now=service.clock.now(),
+        )
+        structured = SubscriptionCreateRequest(
+            query=intent.search_query,
+            frequency=intent.frequency,
+            timezone=intent.timezone,
+            local_time=intent.local_time,
+            weekly_day=intent.weekly_day,
+            run_at=intent.run_at,
             max_retries=request.max_retries,
             retry_backoff_seconds=request.retry_backoff_seconds,
         )
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+        subscription = _create_validated_subscription(service, structured)
+    except ScheduleIntentError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+    except (ValidationError, ValueError) as error:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "schedule_invalid", "message": str(error)},
+        ) from error
+
+    return {
+        "subscription": subscription,
+        "parsed": {
+            "frequency": intent.frequency,
+            "timezone": intent.timezone,
+            "local_time": intent.local_time,
+            "weekly_day": intent.weekly_day,
+            "run_at": intent.run_at,
+            "search_query": intent.search_query,
+            "matched_text": intent.matched_text,
+        },
+    }
 
 
 @router.get("", response_model=SubscriptionListResponse)

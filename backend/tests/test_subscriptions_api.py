@@ -90,6 +90,88 @@ class SubscriptionsApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
 
+    def test_natural_language_query_creates_a_persisted_daily_subscription(self) -> None:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/subscriptions/from-query",
+                json={"query": "每天上午9点查询安徽省服务器采购项目"},
+            )
+
+            self.assertEqual(response.status_code, 201, response.text)
+            body = response.json()
+            created = body["subscription"]
+            parsed = body["parsed"]
+            self.assertEqual(parsed["frequency"], "daily")
+            self.assertEqual(parsed["local_time"], "09:00")
+            self.assertEqual(parsed["search_query"], "查询安徽省服务器采购项目")
+            self.assertEqual(created["query"], parsed["search_query"])
+            self.assertEqual(created["timezone"], "Asia/Shanghai")
+
+            listed = client.get("/api/subscriptions").json()["items"]
+            self.assertEqual([item["task_id"] for item in listed], [created["task_id"]])
+
+    def test_natural_language_query_creates_a_weekly_subscription(self) -> None:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/subscriptions/from-query",
+                json={"query": "每周一下午3点查询上海市计算设备采购"},
+            )
+
+        self.assertEqual(response.status_code, 201, response.text)
+        body = response.json()
+        self.assertEqual(body["parsed"]["frequency"], "weekly")
+        self.assertEqual(body["parsed"]["weekly_day"], "monday")
+        self.assertEqual(body["parsed"]["local_time"], "15:00")
+        self.assertEqual(body["subscription"]["weekly_day"], "monday")
+
+    def test_natural_language_once_subscription_survives_service_restart(self) -> None:
+        local_future = datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(days=2)
+        query = f"{local_future:%Y-%m-%d} 上午9点查询安徽服务器采购"
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/subscriptions/from-query",
+                json={"query": query},
+            )
+            self.assertEqual(response.status_code, 201, response.text)
+            created = response.json()["subscription"]
+
+        with TestClient(app) as restarted_client:
+            restored = restarted_client.get(
+                f"/api/subscriptions/{created['task_id']}"
+            )
+
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(restored.json()["frequency"], "once")
+        self.assertEqual(restored.json()["run_at"], created["run_at"])
+        self.assertGreater(
+            datetime.fromisoformat(created["run_at"]),
+            datetime.now(timezone.utc),
+        )
+
+    def test_invalid_natural_language_requests_do_not_create_subscriptions(self) -> None:
+        cases = {
+            "": "schedule_not_found",
+            "查": "schedule_not_found",
+            "查询服务器项目": "schedule_not_found",
+            "每天查询服务器项目": "schedule_invalid",
+            "每天25点查询服务器项目": "schedule_invalid",
+            "每周一周二9点查询服务器项目": "schedule_ambiguous",
+            "2000-01-01 上午9点查询服务器项目": "schedule_in_past",
+            "每天上午9点": "empty_search_query",
+        }
+
+        with TestClient(app) as client:
+            for query, expected_code in cases.items():
+                with self.subTest(query=query):
+                    response = client.post(
+                        "/api/subscriptions/from-query",
+                        json={"query": query},
+                    )
+                    self.assertEqual(response.status_code, 422, response.text)
+                    self.assertEqual(response.json()["detail"]["code"], expected_code)
+
+            self.assertEqual(client.get("/api/subscriptions").json()["items"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
