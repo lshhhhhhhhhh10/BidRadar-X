@@ -4,14 +4,25 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
+from ..schemas.tender import TenderNotice
 from .database import connect, initialize_database
+from .models import (
+    AttachmentState,
+    SourceResponseMetadata,
+    SourceWatermark,
+    WatermarkCursor,
+)
 
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _audit_now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 def _utc_timestamp(value: datetime) -> str:
@@ -20,8 +31,32 @@ def _utc_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _aware_timestamp(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("datetime must include a timezone")
+    return value.isoformat(timespec="seconds")
+
+
+def _stable_id(*parts: str) -> str:
+    return sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _json_fingerprint(value: Any) -> str:
+    return sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
 class Repository:
     pending_stale_after = timedelta(minutes=5)
+
     def __init__(self) -> None:
         initialize_database()
 
@@ -37,19 +72,60 @@ class Repository:
                 """,
                 (task_id, query, frequency, _now()),
             )
+            self._ensure_task_identity(connection, task_id, _now())
 
     def save_run(self, state: dict[str, Any]) -> None:
+        canonical = _canonical_json(state)
+        result_fingerprint = _json_fingerprint(state)
+        now = _now()
         with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                "INSERT OR REPLACE INTO runs(run_id, task_id, status, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                """
+                INSERT INTO runs(run_id, task_id, status, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    task_id = excluded.task_id,
+                    status = excluded.status,
+                    result_json = excluded.result_json
+                """,
                 (
                     state["run_id"],
                     state["task_id"],
                     state["status"],
-                    json.dumps(state, ensure_ascii=False),
-                    _now(),
+                    canonical,
+                    now,
                 ),
             )
+            existing = connection.execute(
+                """
+                SELECT 1 FROM run_versions
+                WHERE run_id = ? AND result_fingerprint = ?
+                """,
+                (state["run_id"], result_fingerprint),
+            ).fetchone()
+            if existing is None:
+                version = connection.execute(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM run_versions WHERE run_id = ?",
+                    (state["run_id"],),
+                ).fetchone()[0]
+                connection.execute(
+                    """
+                    INSERT INTO run_versions(
+                        run_version_id, run_id, version, status,
+                        result_fingerprint, result_json, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _stable_id(state["run_id"], result_fingerprint),
+                        state["run_id"],
+                        version,
+                        state["status"],
+                        result_fingerprint,
+                        canonical,
+                        _audit_now(),
+                    ),
+                )
 
     def load_snapshots(self, task_id: str) -> dict[str, dict[str, Any]]:
         with connect() as connection:
@@ -101,7 +177,7 @@ class Repository:
                 DO UPDATE SET facts_json = excluded.facts_json, updated_at = excluded.updated_at
                 """,
                 [
-                    (task_id, item["project_id"], json.dumps(item["facts"], ensure_ascii=False), _now())
+                    (task_id, item["project_id"], _canonical_json(item["facts"]), _now())
                     for item in analyses
                 ],
             )
@@ -113,6 +189,163 @@ class Repository:
                 (task_id,),
             ).fetchall()
         return {row["source_id"]: json.loads(row["watermark_json"]) for row in rows}
+
+    def start_collection_run(
+        self,
+        *,
+        collection_run_id: str,
+        task_id: str,
+        source_id: str,
+        idempotency_key: str,
+        started_at: datetime,
+    ) -> dict[str, Any]:
+        """Create or reuse an idempotent, source-scoped collection attempt."""
+
+        started_at_text = _aware_timestamp(started_at)
+        with connect() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO collection_runs(
+                        collection_run_id, task_id, source_id, idempotency_key,
+                        status, started_at, created_at
+                    ) VALUES (?, ?, ?, ?, 'running', ?, ?)
+                    """,
+                    (
+                        collection_run_id,
+                        task_id,
+                        source_id,
+                        idempotency_key,
+                        started_at_text,
+                        _now(),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                row = connection.execute(
+                    """
+                    SELECT * FROM collection_runs
+                    WHERE task_id = ? AND source_id = ? AND idempotency_key = ?
+                    """,
+                    (task_id, source_id, idempotency_key),
+                ).fetchone()
+                if row is None:
+                    raise
+                return dict(row)
+            row = connection.execute(
+                "SELECT * FROM collection_runs WHERE collection_run_id = ?",
+                (collection_run_id,),
+            ).fetchone()
+        return dict(row)
+
+    def commit_collection_run(
+        self,
+        *,
+        collection_run_id: str,
+        notices: list[TenderNotice],
+        watermark: SourceWatermark,
+        completed_at: datetime,
+        attachment_states: Mapping[str, AttachmentState] | None = None,
+        response_metadata: SourceResponseMetadata | None = None,
+    ) -> None:
+        """Atomically persist a successful collection batch and its watermark."""
+
+        completed_at_text = _aware_timestamp(completed_at)
+        states = attachment_states or {}
+        with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                "SELECT * FROM collection_runs WHERE collection_run_id = ?",
+                (collection_run_id,),
+            ).fetchone()
+            if run is None:
+                raise ValueError("collection run must be started before commit")
+            if run["status"] == "succeeded":
+                return
+            if run["status"] != "running":
+                raise ValueError(f"cannot commit collection run in {run['status']} state")
+            if run["task_id"] is None:
+                raise ValueError("collection run is missing its task identity")
+            if watermark.source_id != run["source_id"]:
+                raise ValueError("watermark source must match the collection run source")
+
+            for notice in notices:
+                self._persist_tender_notice(
+                    connection,
+                    notice,
+                    collection_run_id=collection_run_id,
+                    attachment_states=states,
+                    response_metadata=response_metadata,
+                )
+
+            watermark_payload = {
+                "task_id": run["task_id"],
+                "source_id": watermark.source_id,
+                "run_id": collection_run_id,
+                "published_at": _aware_timestamp(watermark.published_at),
+                "source_notice_id": watermark.source_notice_id,
+                "source_url": watermark.source_url,
+            }
+            self._write_watermark(
+                connection,
+                task_id=run["task_id"],
+                source_id=watermark.source_id,
+                cursor=watermark.to_cursor(),
+                collection_run_id=collection_run_id,
+                watermark_payload=watermark_payload,
+                now=completed_at_text,
+            )
+            connection.execute(
+                """
+                UPDATE collection_runs
+                SET status = 'succeeded', completed_at = ?,
+                    error_code = NULL, error_message = NULL
+                WHERE collection_run_id = ? AND status = 'running'
+                """,
+                (completed_at_text, collection_run_id),
+            )
+
+    def fail_collection_run(
+        self,
+        *,
+        collection_run_id: str,
+        completed_at: datetime,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        """Record a failed attempt without touching observations or watermarks."""
+
+        with connect() as connection:
+            return connection.execute(
+                """
+                UPDATE collection_runs
+                SET status = 'failed', completed_at = ?, error_code = ?, error_message = ?
+                WHERE collection_run_id = ? AND status = 'running'
+                """,
+                (
+                    _aware_timestamp(completed_at),
+                    error_code,
+                    error_message[:2000],
+                    collection_run_id,
+                ),
+            ).rowcount == 1
+
+    def get_tender_notice(self, publication_id: str) -> TenderNotice | None:
+        """Load the latest complete contract payload and validate it on read."""
+
+        with connect() as connection:
+            row = connection.execute(
+                """
+                SELECT notice_json
+                FROM publication_payload_versions
+                WHERE publication_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (publication_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return TenderNotice.model_validate(json.loads(row["notice_json"]))
 
     def list_deliveries(self, task_id: str) -> list[dict[str, Any]]:
         with connect() as connection:
@@ -177,9 +410,9 @@ class Repository:
                         run_id,
                         delivery_type,
                         delivery_fingerprint,
-                        json.dumps(changes, ensure_ascii=False, sort_keys=True),
-                        json.dumps(sorted(project_stable_fingerprints or [])),
-                        json.dumps(sorted(notice_stable_fingerprints or [])),
+                        _canonical_json(changes),
+                        _canonical_json(sorted(project_stable_fingerprints or [])),
+                        _canonical_json(sorted(notice_stable_fingerprints or [])),
                         now,
                         now,
                     ),
@@ -188,6 +421,17 @@ class Repository:
                     "SELECT * FROM deliveries WHERE delivery_id = ?",
                     (delivery_id,),
                 ).fetchone()
+                self._record_delivery_changes(
+                    connection,
+                    delivery_id=delivery_id,
+                    changes=changes,
+                )
+                self._record_delivery_event(
+                    connection,
+                    delivery_id=delivery_id,
+                    run_id=run_id,
+                    status="pending",
+                )
                 return True, self._delivery_row(row)
             except sqlite3.IntegrityError as error:
                 row = connection.execute(
@@ -225,6 +469,12 @@ class Repository:
                             "SELECT * FROM deliveries WHERE delivery_fingerprint = ?",
                             (delivery_fingerprint,),
                         ).fetchone()
+                        self._record_delivery_event(
+                            connection,
+                            delivery_id=row["delivery_id"],
+                            run_id=run_id,
+                            status="pending",
+                        )
                         return True, self._delivery_row(row)
                 if row is None:
                     raise RuntimeError("delivery reservation disappeared") from error
@@ -237,14 +487,26 @@ class Repository:
         error: str,
     ) -> None:
         with connect() as connection:
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE deliveries
                 SET status = 'failed', error = ?, updated_at = ?
                 WHERE delivery_fingerprint = ? AND run_id = ? AND status = 'pending'
                 """,
                 (error[:2000], _now(), delivery_fingerprint, run_id),
-            )
+            ).rowcount
+            if updated:
+                row = connection.execute(
+                    "SELECT delivery_id FROM deliveries WHERE delivery_fingerprint = ?",
+                    (delivery_fingerprint,),
+                ).fetchone()
+                self._record_delivery_event(
+                    connection,
+                    delivery_id=row["delivery_id"],
+                    run_id=run_id,
+                    status="failed",
+                    error=error[:2000],
+                )
 
     def commit_generated_delivery(
         self,
@@ -267,18 +529,32 @@ class Repository:
                 raise RuntimeError("delivery must be reserved before commit")
             if row["status"] not in {"pending", "generated", "delivered"}:
                 raise RuntimeError(f"cannot commit delivery in {row['status']} state")
+            if row["status"] in {"generated", "delivered"}:
+                return
             if row["status"] == "pending" and row["run_id"] != run_id:
                 raise RuntimeError("only the delivery owner can commit a pending delivery")
 
-            connection.execute(
-                """
-                UPDATE deliveries
-                SET status = 'generated', artifact_uri = ?, error = NULL,
-                    generated_at = COALESCE(generated_at, ?), updated_at = ?
-                WHERE delivery_fingerprint = ?
-                """,
-                (artifact_uri, now, now, delivery_fingerprint),
-            )
+            if row["status"] == "pending":
+                connection.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'generated', artifact_uri = ?, error = NULL,
+                        generated_at = COALESCE(generated_at, ?), updated_at = ?
+                    WHERE delivery_fingerprint = ? AND status = 'pending'
+                    """,
+                    (artifact_uri, now, now, delivery_fingerprint),
+                )
+                delivery = connection.execute(
+                    "SELECT delivery_id FROM deliveries WHERE delivery_fingerprint = ?",
+                    (delivery_fingerprint,),
+                ).fetchone()
+                self._record_delivery_event(
+                    connection,
+                    delivery_id=delivery["delivery_id"],
+                    run_id=run_id,
+                    status="generated",
+                    artifact_uri=artifact_uri,
+                )
             self._commit_snapshots(connection, task_id, snapshots, now)
             self._commit_watermarks(connection, task_id, watermarks, now)
 
@@ -354,6 +630,7 @@ class Repository:
                 """,
                 (task_id, query, frequency, now_text),
             )
+            self._ensure_task_identity(connection, task_id, now_text)
             row = connection.execute(
                 "SELECT * FROM subscriptions WHERE task_id = ?",
                 (task_id,),
@@ -671,6 +948,439 @@ class Repository:
             ).rowcount == 1
 
     @staticmethod
+    def _ensure_task_identity(connection: Any, task_id: str, now: str) -> None:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO task_identities(task_id, created_at)
+            VALUES (?, ?)
+            """,
+            (task_id, now),
+        )
+
+    @staticmethod
+    def _record_delivery_event(
+        connection: Any,
+        *,
+        delivery_id: str,
+        run_id: str,
+        status: str,
+        artifact_uri: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO delivery_events(
+                event_id, delivery_id, status, run_id,
+                artifact_uri, error, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                delivery_id,
+                status,
+                run_id,
+                artifact_uri,
+                error,
+                _audit_now(),
+            ),
+        )
+
+    @staticmethod
+    def _record_delivery_changes(
+        connection: Any,
+        *,
+        delivery_id: str,
+        changes: list[dict[str, Any]],
+    ) -> None:
+        canonical = _canonical_json(changes)
+        fingerprint = _json_fingerprint(changes)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO delivery_change_versions(
+                change_version_id, delivery_id, change_fingerprint,
+                changes_json, recorded_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                _stable_id(delivery_id, fingerprint),
+                delivery_id,
+                fingerprint,
+                canonical,
+                _audit_now(),
+            ),
+        )
+
+    @staticmethod
+    def _record_publication_payload(
+        connection: Any,
+        *,
+        publication_id: str,
+        notice_payload: dict[str, Any],
+        now: str,
+    ) -> None:
+        canonical = _canonical_json(notice_payload)
+        fingerprint = _json_fingerprint(notice_payload)
+        existing = connection.execute(
+            """
+            SELECT 1 FROM publication_payload_versions
+            WHERE publication_id = ? AND payload_fingerprint = ?
+            """,
+            (publication_id, fingerprint),
+        ).fetchone()
+        if existing is not None:
+            return
+        version = connection.execute(
+            """
+            SELECT COALESCE(MAX(version), 0) + 1
+            FROM publication_payload_versions
+            WHERE publication_id = ?
+            """,
+            (publication_id,),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO publication_payload_versions(
+                payload_version_id, publication_id, version,
+                payload_fingerprint, notice_json, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _stable_id(publication_id, fingerprint),
+                publication_id,
+                version,
+                fingerprint,
+                canonical,
+                now,
+            ),
+        )
+
+    @staticmethod
+    def _record_attachment_state(
+        connection: Any,
+        *,
+        attachment_pk: str,
+        state: dict[str, Any],
+        now: str,
+    ) -> None:
+        fingerprint = _json_fingerprint(state)
+        existing = connection.execute(
+            """
+            SELECT 1 FROM attachment_versions
+            WHERE attachment_pk = ? AND state_fingerprint = ?
+            """,
+            (attachment_pk, fingerprint),
+        ).fetchone()
+        if existing is not None:
+            return
+        version = connection.execute(
+            """
+            SELECT COALESCE(MAX(version), 0) + 1
+            FROM attachment_versions
+            WHERE attachment_pk = ?
+            """,
+            (attachment_pk,),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO attachment_versions(
+                attachment_version_id, attachment_pk, version,
+                state_fingerprint, status, media_type, size_bytes,
+                content_sha256, fetched_at, failure_reason, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _stable_id(attachment_pk, fingerprint),
+                attachment_pk,
+                version,
+                fingerprint,
+                state["status"],
+                state["media_type"],
+                state["size_bytes"],
+                state["content_sha256"],
+                state["fetched_at"],
+                state["failure_reason"],
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE attachments
+            SET status = ?, media_type = ?, size_bytes = ?,
+                content_sha256 = ?, fetched_at = ?, failure_reason = ?
+            WHERE attachment_pk = ?
+            """,
+            (
+                state["status"],
+                state["media_type"],
+                state["size_bytes"],
+                state["content_sha256"],
+                state["fetched_at"],
+                state["failure_reason"],
+                attachment_pk,
+            ),
+        )
+
+    @staticmethod
+    def _persist_tender_notice(
+        connection: Any,
+        notice: TenderNotice,
+        *,
+        collection_run_id: str | None,
+        attachment_states: Mapping[str, AttachmentState] | None = None,
+        response_metadata: SourceResponseMetadata | None = None,
+    ) -> str:
+        now = _now()
+        notice_payload = TenderNotice.model_validate(
+            notice.model_dump(mode="json")
+        ).model_dump(mode="json")
+        project_id = notice_payload["project_stable_fingerprint"]
+        notice_event_id = notice_payload["notice_stable_fingerprint"]
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO projects(
+                project_id, project_stable_fingerprint,
+                fingerprint_version, created_at
+            ) VALUES (?, ?, 'contract-v1', ?)
+            """,
+            (project_id, notice_payload["project_stable_fingerprint"], now),
+        )
+        existing_event = connection.execute(
+            "SELECT project_id, notice_type FROM notice_events WHERE notice_event_id = ?",
+            (notice_event_id,),
+        ).fetchone()
+        if existing_event is not None and (
+            existing_event["project_id"] != project_id
+            or existing_event["notice_type"] != notice_payload["notice_type"]
+        ):
+            raise ValueError(
+                "notice identity is already bound to a different project or lifecycle type"
+            )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO notice_events(
+                notice_event_id, project_id, notice_stable_fingerprint,
+                fingerprint_version, notice_type, project_code, created_at
+            ) VALUES (?, ?, ?, 'contract-v1', ?, ?, ?)
+            """,
+            (
+                notice_event_id,
+                project_id,
+                notice_payload["notice_stable_fingerprint"],
+                notice_payload["notice_type"],
+                notice_payload["project_code"],
+                now,
+            ),
+        )
+
+        source = notice_payload["source"]
+        source_id = source["source_id"]
+        source_url = source["source_url"]
+        publication_id = _stable_id(
+            source_id,
+            notice_payload["notice_id"],
+            source_url,
+            source["publication_role"],
+            notice_payload["raw_content_fingerprint"],
+        )
+        existing_publication = connection.execute(
+            """
+            SELECT * FROM source_publications
+            WHERE publication_id = ?
+               OR (
+                   source_id = ? AND notice_id = ? AND source_url = ?
+                   AND publication_role = ?
+                   AND raw_content_fingerprint = ?
+               )
+            """,
+            (
+                publication_id,
+                source_id,
+                notice_payload["notice_id"],
+                source_url,
+                source["publication_role"],
+                notice_payload["raw_content_fingerprint"],
+            ),
+        ).fetchone()
+        if existing_publication is not None:
+            if existing_publication["notice_event_id"] != notice_event_id:
+                raise ValueError(
+                    "source publication identity is already bound to another notice"
+                )
+            publication_id = existing_publication["publication_id"]
+        else:
+            metadata_json = (
+                _canonical_json(response_metadata.metadata)
+                if response_metadata is not None
+                and response_metadata.metadata is not None
+                else None
+            )
+            connection.execute(
+                """
+                INSERT INTO source_publications(
+                    publication_id, notice_id, notice_event_id,
+                    source_id, source_name, source_url,
+                    canonical_notice_url, source_notice_id, publication_role,
+                    title, published_at, fetched_at, core_content,
+                    raw_content_fingerprint, response_http_status,
+                    response_content_type, response_etag,
+                    response_last_modified, response_metadata_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    publication_id,
+                    notice_payload["notice_id"],
+                    notice_event_id,
+                    source_id,
+                    source["source_name"],
+                    source_url,
+                    (
+                        source["canonical_notice_url"]
+                        if source["canonical_notice_url"] is not None
+                        else None
+                    ),
+                    source["source_notice_id"],
+                    source["publication_role"],
+                    notice_payload["title"],
+                    notice_payload["published_at"],
+                    notice_payload["fetched_at"],
+                    notice_payload["core_content"],
+                    notice_payload["raw_content_fingerprint"],
+                    response_metadata.http_status if response_metadata else None,
+                    response_metadata.content_type if response_metadata else None,
+                    response_metadata.etag if response_metadata else None,
+                    response_metadata.last_modified if response_metadata else None,
+                    metadata_json,
+                    now,
+                ),
+            )
+
+        Repository._record_publication_payload(
+            connection,
+            publication_id=publication_id,
+            notice_payload=notice_payload,
+            now=now,
+        )
+
+        if collection_run_id is not None:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO collection_run_publications(
+                    collection_run_id, publication_id, observed_at
+                ) VALUES (?, ?, ?)
+                """,
+                (collection_run_id, publication_id, notice_payload["fetched_at"]),
+            )
+
+        states = attachment_states or {}
+        attachment_pks: dict[str, str] = {}
+        for attachment in notice_payload["attachments"]:
+            attachment_id = attachment["attachment_id"]
+            attachment_pk = _stable_id(publication_id, attachment_id)
+            attachment_pks[attachment_id] = attachment_pk
+            existing_attachment = connection.execute(
+                "SELECT * FROM attachments WHERE attachment_pk = ?",
+                (attachment_pk,),
+            ).fetchone()
+            explicit_state = states.get(attachment_id)
+            if explicit_state is not None:
+                attachment_state = {
+                    "status": explicit_state.status,
+                    "media_type": explicit_state.media_type or attachment["media_type"],
+                    "size_bytes": explicit_state.size_bytes,
+                    "content_sha256": (
+                        explicit_state.content_sha256 or attachment["content_sha256"]
+                    ),
+                    "fetched_at": (
+                        explicit_state.fetched_at.isoformat()
+                        if explicit_state.fetched_at is not None
+                        else attachment["fetched_at"]
+                    ),
+                    "failure_reason": explicit_state.failure_reason,
+                }
+            elif existing_attachment is not None:
+                attachment_state = {
+                    "status": existing_attachment["status"],
+                    "media_type": existing_attachment["media_type"],
+                    "size_bytes": existing_attachment["size_bytes"],
+                    "content_sha256": existing_attachment["content_sha256"],
+                    "fetched_at": existing_attachment["fetched_at"],
+                    "failure_reason": existing_attachment["failure_reason"],
+                }
+            else:
+                attachment_state = {
+                    "status": (
+                        "downloaded"
+                        if attachment["content_sha256"] is not None
+                        and attachment["fetched_at"] is not None
+                        else "discovered"
+                    ),
+                    "media_type": attachment["media_type"],
+                    "size_bytes": None,
+                    "content_sha256": attachment["content_sha256"],
+                    "fetched_at": attachment["fetched_at"],
+                    "failure_reason": None,
+                }
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO attachments(
+                    attachment_pk, attachment_id, publication_id,
+                    entry_url, name, status, media_type, size_bytes,
+                    content_sha256, fetched_at, failure_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attachment_pk,
+                    attachment_id,
+                    publication_id,
+                    attachment["url"],
+                    attachment["name"],
+                    attachment_state["status"],
+                    attachment_state["media_type"],
+                    attachment_state["size_bytes"],
+                    attachment_state["content_sha256"],
+                    attachment_state["fetched_at"],
+                    attachment_state["failure_reason"],
+                    now,
+                ),
+            )
+            Repository._record_attachment_state(
+                connection,
+                attachment_pk=attachment_pk,
+                state=attachment_state,
+                now=now,
+            )
+
+        for evidence in notice_payload["evidence"]:
+            if evidence["attachment_id"] is not None:
+                attachment_pks[evidence["attachment_id"]]
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO field_evidence(
+                    evidence_pk, evidence_id, publication_id, notice_event_id,
+                    attachment_id, field_path, source_url, document_name,
+                    page_number, section, locator, quote, fetched_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _stable_id(publication_id, evidence["evidence_id"]),
+                    evidence["evidence_id"],
+                    publication_id,
+                    notice_event_id,
+                    evidence["attachment_id"],
+                    evidence["field_path"],
+                    evidence["source_url"],
+                    evidence["document_name"],
+                    evidence["page_number"],
+                    evidence["section"],
+                    evidence["locator"],
+                    evidence["quote"],
+                    evidence["fetched_at"],
+                    now,
+                ),
+            )
+        return publication_id
+
+    @staticmethod
     def _commit_snapshots(
         connection: Any,
         task_id: str,
@@ -679,6 +1389,16 @@ class Repository:
     ) -> None:
         for snapshot in snapshots:
             project_fingerprint = snapshot["project_stable_fingerprint"]
+            Repository._ensure_task_identity(connection, task_id, now)
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO projects(
+                    project_id, project_stable_fingerprint,
+                    fingerprint_version, created_at
+                ) VALUES (?, ?, 'contract-v1', ?)
+                """,
+                (project_fingerprint, project_fingerprint, now),
+            )
             current = connection.execute(
                 """
                 SELECT version, snapshot_fingerprint
@@ -690,6 +1410,28 @@ class Repository:
             if current is not None and current["snapshot_fingerprint"] == snapshot["snapshot_fingerprint"]:
                 continue
             version = (current["version"] if current is not None else 0) + 1
+            canonical_snapshot = _canonical_json(snapshot)
+            connection.execute(
+                """
+                INSERT INTO project_snapshot_versions(
+                    snapshot_id, task_id, project_id, snapshot_fingerprint,
+                    version, snapshot_json, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _stable_id(
+                        task_id,
+                        project_fingerprint,
+                        snapshot["snapshot_fingerprint"],
+                    ),
+                    task_id,
+                    project_fingerprint,
+                    snapshot["snapshot_fingerprint"],
+                    version,
+                    canonical_snapshot,
+                    now,
+                ),
+            )
             connection.execute(
                 """
                 INSERT INTO project_snapshots(
@@ -708,11 +1450,11 @@ class Repository:
                 (
                     task_id,
                     snapshot["project_id"],
-                    json.dumps(snapshot["facts"], ensure_ascii=False, sort_keys=True),
+                    _canonical_json(snapshot["facts"]),
                     now,
                     project_fingerprint,
                     snapshot["snapshot_fingerprint"],
-                    json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                    canonical_snapshot,
                     version,
                 ),
             )
@@ -727,9 +1469,16 @@ class Repository:
     ) -> None:
         project_fingerprint = snapshot["project_stable_fingerprint"]
         for notice in snapshot["notices"]:
-            canonical = json.dumps(notice, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            notice_snapshot_fingerprint = sha256(canonical.encode("utf-8")).hexdigest()
-            notice_fingerprint = notice["notice_stable_fingerprint"]
+            validated_notice = TenderNotice.model_validate(notice)
+            notice_payload = validated_notice.model_dump(mode="json")
+            Repository._persist_tender_notice(
+                connection,
+                validated_notice,
+                collection_run_id=None,
+            )
+            canonical = _canonical_json(notice_payload)
+            notice_snapshot_fingerprint = _json_fingerprint(notice_payload)
+            notice_fingerprint = notice_payload["notice_stable_fingerprint"]
             existing = connection.execute(
                 """
                 SELECT 1 FROM notice_snapshots
@@ -775,6 +1524,7 @@ class Repository:
         now: str,
     ) -> None:
         for watermark in watermarks:
+            Repository._ensure_task_identity(connection, task_id, now)
             row = connection.execute(
                 """
                 SELECT watermark_json FROM source_watermarks
@@ -811,10 +1561,116 @@ class Repository:
                 (
                     task_id,
                     watermark["source_id"],
-                    json.dumps(merged, ensure_ascii=False, sort_keys=True),
+                    _canonical_json(merged),
                     now,
                 ),
             )
+            cursor_published_at = (
+                merged.get("max_published_at")
+                or merged.get("processed_through")
+                or merged.get("max_fetched_at")
+            )
+            notice_fingerprints = merged.get("notice_stable_fingerprints", [])
+            cursor_notice_fingerprint = (
+                notice_fingerprints[-1] if notice_fingerprints else None
+            )
+            if cursor_published_at is not None and (
+                merged.get("source_notice_id") is not None
+                or merged.get("source_url") is not None
+                or cursor_notice_fingerprint is not None
+            ):
+                Repository._write_watermark(
+                    connection,
+                    task_id=task_id,
+                    source_id=watermark["source_id"],
+                    cursor=WatermarkCursor(
+                        published_at=datetime.fromisoformat(cursor_published_at),
+                        source_notice_id=merged.get("source_notice_id"),
+                        source_url=merged.get("source_url"),
+                        notice_stable_fingerprint=cursor_notice_fingerprint,
+                    ),
+                    collection_run_id=None,
+                    watermark_payload=merged,
+                    now=now,
+                    update_current=False,
+                )
+
+    @staticmethod
+    def _write_watermark(
+        connection: Any,
+        *,
+        task_id: str,
+        source_id: str,
+        cursor: WatermarkCursor,
+        collection_run_id: str | None,
+        watermark_payload: dict[str, Any],
+        now: str,
+        update_current: bool = True,
+    ) -> None:
+        cursor_published_at = cursor.published_at.isoformat(timespec="seconds")
+        identity_payload = {
+            "published_at": cursor_published_at,
+            "source_notice_id": cursor.source_notice_id,
+            "source_url": cursor.source_url,
+            "notice_stable_fingerprint": cursor.notice_stable_fingerprint,
+        }
+        identity_fingerprint = _json_fingerprint(identity_payload)
+        canonical = _canonical_json(watermark_payload)
+        Repository._ensure_task_identity(connection, task_id, now)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO source_watermark_versions(
+                watermark_id, task_id, source_id, collection_run_id,
+                cursor_published_at, cursor_source_notice_id,
+                cursor_source_url, cursor_notice_fingerprint,
+                cursor_identity_fingerprint, watermark_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _stable_id(task_id, source_id, identity_fingerprint),
+                task_id,
+                source_id,
+                collection_run_id,
+                cursor_published_at,
+                cursor.source_notice_id,
+                cursor.source_url,
+                cursor.notice_stable_fingerprint,
+                identity_fingerprint,
+                canonical,
+                now,
+            ),
+        )
+        if not update_current:
+            return
+
+        current = connection.execute(
+            """
+            SELECT watermark_json FROM source_watermarks
+            WHERE task_id = ? AND source_id = ?
+            """,
+            (task_id, source_id),
+        ).fetchone()
+        if current is not None:
+            previous = json.loads(current["watermark_json"])
+            previous_cursor = previous.get("published_at") or previous.get(
+                "max_published_at"
+            )
+            if (
+                previous_cursor is not None
+                and datetime.fromisoformat(previous_cursor)
+                > datetime.fromisoformat(cursor_published_at)
+            ):
+                return
+        connection.execute(
+            """
+            INSERT INTO source_watermarks(task_id, source_id, watermark_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(task_id, source_id) DO UPDATE SET
+                watermark_json = excluded.watermark_json,
+                updated_at = excluded.updated_at
+            """,
+            (task_id, source_id, canonical, now),
+        )
 
     @staticmethod
     def _delivery_row(row: Any) -> dict[str, Any]:

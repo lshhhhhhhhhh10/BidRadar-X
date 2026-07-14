@@ -1,22 +1,32 @@
 from __future__ import annotations
 
-import sqlite3
+from dataclasses import dataclass
+from datetime import datetime
 import os
+from pathlib import Path
+import sqlite3
 import tempfile
 from threading import Lock
-from pathlib import Path
+from typing import Callable, Iterable
+
+from .migrations import MIGRATION_SPECS
 
 
 # The bundled Python runtime cannot reliably open SQLite files below a Windows
 # path containing non-ASCII characters. Keep simulation data in the user's
 # local temp area by default and allow an explicit ASCII path override.
-DATA_DIR = Path(os.environ.get("TENDER_DATA_DIR", Path(tempfile.gettempdir()) / "TenderIntelligence"))
+DATA_DIR = Path(
+    os.environ.get(
+        "TENDER_DATA_DIR",
+        Path(tempfile.gettempdir()) / "TenderIntelligence",
+    )
+)
 DATABASE_PATH = DATA_DIR / "app.db"
 _INITIALIZE_LOCK = Lock()
 
 
 class ClosingConnection(sqlite3.Connection):
-    """Commits or rolls back like sqlite3, then releases Windows file handles."""
+    """Commit or roll back like sqlite3, then release Windows file handles."""
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
@@ -25,12 +35,30 @@ class ClosingConnection(sqlite3.Connection):
             self.close()
 
 
+@dataclass(frozen=True)
+class Migration:
+    """One immutable, ordered database schema migration."""
+
+    version: int
+    name: str
+    checksum: str
+    upgrade: Callable[[sqlite3.Connection], None]
+
+
+MIGRATIONS = tuple(Migration(*spec) for spec in MIGRATION_SPECS)
+
+
 def connect() -> sqlite3.Connection:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=5, factory=ClosingConnection)
+    connection = sqlite3.connect(
+        DATABASE_PATH,
+        timeout=5,
+        factory=ClosingConnection,
+    )
     try:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
         return connection
     except Exception:
         connection.close()
@@ -38,153 +66,79 @@ def connect() -> sqlite3.Connection:
 
 
 def initialize_database() -> None:
+    """Upgrade the configured database to the latest committed schema."""
+
     with _INITIALIZE_LOCK:
         with connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript(
-                """
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id TEXT PRIMARY KEY,
-                query TEXT NOT NULL,
-                frequency TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS runs (
-                run_id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                result_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS project_snapshots (
-                task_id TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                facts_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (task_id, project_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS project_profiles (
-                run_id TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                project_json TEXT NOT NULL,
-                modules_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (run_id, project_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS source_watermarks (
-                task_id TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                watermark_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (task_id, source_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS notice_snapshots (
-                task_id TEXT NOT NULL,
-                project_stable_fingerprint TEXT NOT NULL,
-                notice_stable_fingerprint TEXT NOT NULL,
-                snapshot_fingerprint TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                notice_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (task_id, notice_stable_fingerprint, version),
-                UNIQUE (task_id, notice_stable_fingerprint, snapshot_fingerprint)
-            );
-
-            CREATE TABLE IF NOT EXISTS deliveries (
-                delivery_id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                delivery_type TEXT NOT NULL,
-                delivery_fingerprint TEXT NOT NULL UNIQUE,
-                status TEXT NOT NULL CHECK(status IN ('pending', 'generated', 'delivered', 'failed')),
-                project_fingerprints_json TEXT NOT NULL DEFAULT '[]',
-                notice_fingerprints_json TEXT NOT NULL DEFAULT '[]',
-                changes_json TEXT NOT NULL,
-                artifact_uri TEXT,
-                error TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                generated_at TEXT,
-                delivered_at TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_deliveries_task_created
-            ON deliveries(task_id, created_at DESC);
-
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                task_id TEXT PRIMARY KEY,
-                query TEXT NOT NULL,
-                frequency TEXT NOT NULL CHECK(frequency IN ('once', 'daily', 'weekly')),
-                timezone TEXT NOT NULL,
-                local_time TEXT NOT NULL,
-                weekly_day TEXT,
-                run_at TEXT,
-                next_run_at TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'completed', 'failed')),
-                retry_count INTEGER NOT NULL DEFAULT 0,
-                max_retries INTEGER NOT NULL DEFAULT 3,
-                retry_backoff_seconds INTEGER NOT NULL DEFAULT 30,
-                last_run_at TEXT,
-                last_error TEXT,
-                lease_owner TEXT,
-                lease_expires_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_subscriptions_due
-            ON subscriptions(status, next_run_at, lease_expires_at);
-
-            CREATE TABLE IF NOT EXISTS schedule_runs (
-                run_id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                scheduled_for TEXT NOT NULL,
-                worker_id TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('running', 'succeeded', 'failed', 'lease_expired')),
-                retry_count INTEGER NOT NULL,
-                started_at TEXT NOT NULL,
-                completed_at TEXT,
-                error TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_schedule_runs_task_started
-            ON schedule_runs(task_id, started_at);
-                """
-            )
-            _add_missing_columns(
-                connection,
-                "project_snapshots",
-                {
-                    "project_stable_fingerprint": "TEXT",
-                    "snapshot_fingerprint": "TEXT",
-                    "snapshot_json": "TEXT",
-                    "version": "INTEGER NOT NULL DEFAULT 0",
-                },
-            )
-            _add_missing_columns(
-                connection,
-                "deliveries",
-                {
-                    "project_fingerprints_json": "TEXT NOT NULL DEFAULT '[]'",
-                    "notice_fingerprints_json": "TEXT NOT NULL DEFAULT '[]'",
-                },
-            )
+            apply_migrations(connection)
 
 
-def _add_missing_columns(
+def apply_migrations(
     connection: sqlite3.Connection,
-    table: str,
-    columns: dict[str, str],
+    migrations: Iterable[Migration] = MIGRATIONS,
 ) -> None:
-    existing = {
-        row["name"]
-        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    """Apply pending migrations one at a time with atomic version recording."""
+
+    ordered = tuple(migrations)
+    versions = [migration.version for migration in ordered]
+    if versions != sorted(versions) or len(versions) != len(set(versions)):
+        raise ValueError("migrations must have unique versions in ascending order")
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    applied = {
+        row["version"]: row
+        for row in connection.execute(
+            "SELECT version, name, checksum FROM schema_migrations"
+        ).fetchall()
     }
-    for name, declaration in columns.items():
-        if name not in existing:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+    unknown_versions = sorted(set(applied).difference(versions))
+    if unknown_versions:
+        raise RuntimeError(
+            f"database has migrations newer than this application: {unknown_versions}"
+        )
+    applied_versions = sorted(applied)
+    if applied_versions != versions[: len(applied_versions)]:
+        raise RuntimeError("database migration history is not a contiguous prefix")
+
+    for migration in ordered:
+        existing = applied.get(migration.version)
+        if existing is not None:
+            if (
+                existing["name"] != migration.name
+                or existing["checksum"] != migration.checksum
+            ):
+                raise RuntimeError(
+                    f"migration {migration.version} does not match its applied checksum"
+                )
+            continue
+
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            migration.upgrade(connection)
+            connection.execute(
+                """
+                INSERT INTO schema_migrations(version, name, checksum, applied_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    migration.version,
+                    migration.name,
+                    migration.checksum,
+                    datetime.now().astimezone().isoformat(timespec="seconds"),
+                ),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
