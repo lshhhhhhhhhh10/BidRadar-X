@@ -5,10 +5,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from .api.tasks import router as tasks_router
 from .api.projects import router as projects_router
+from .api.reports import router as reports_router
 from .api.subscriptions import router as subscriptions_router
 from .services.publisher import REPORT_DIR
 from .services.scheduler import LocalScheduler, SystemClock
@@ -56,8 +56,8 @@ app.add_middleware(
 )
 app.include_router(tasks_router)
 app.include_router(projects_router)
+app.include_router(reports_router)
 app.include_router(subscriptions_router)
-app.mount("/reports", StaticFiles(directory=REPORT_DIR), name="reports")
 
 
 @app.get("/")

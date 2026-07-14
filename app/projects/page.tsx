@@ -1,46 +1,90 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { getRunIdFromLocation, listProjects, type ProjectSummary } from "@/lib/tender-api";
+import {
+  getRunForTask,
+  getRunReport,
+  listProjects,
+  resolveApiUrl,
+  type ProjectSummary,
+  type ReportView,
+  type RunSummary,
+} from "@/lib/tender-api";
 
 
 export default function ProjectsPage() {
-  const [runId, setRunId] = useState("");
+  const searchParams = useSearchParams();
+  const runId = searchParams.get("run") ?? "";
+  const taskId = searchParams.get("task") ?? "";
+  const [run, setRun] = useState<RunSummary | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [report, setReport] = useState<ReportView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const activeRun = getRunIdFromLocation();
-    setRunId(activeRun);
-    if (!activeRun) {
-      setError("没有找到已运行的检索任务，请先从首页创建任务。");
-      setLoading(false);
-      return;
+    let cancelled = false;
+    async function load() {
+      await Promise.resolve();
+      if (!cancelled) {
+        setLoading(true);
+        setError("");
+        setRun(null);
+        setProjects([]);
+        setReport(null);
+      }
+      if (!runId || !taskId) {
+        if (!cancelled) {
+          setError("结果地址缺少 run_id 或 task_id，请从首页重新运行任务。");
+          setLoading(false);
+        }
+        return;
+      }
+      try {
+        const [runResult, projectResult, reportResult] = await Promise.all([
+          getRunForTask(runId, taskId),
+          listProjects(runId),
+          getRunReport(runId),
+        ]);
+        if (!cancelled) {
+          setRun(runResult);
+          setProjects(projectResult.items);
+          setReport(reportResult);
+        }
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : "读取运行结果失败");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
-    listProjects(activeRun)
-      .then((result) => setProjects(result.items))
-      .catch((reason: Error) => setError(reason.message))
-      .finally(() => setLoading(false));
-  }, []);
+    void load();
+    return () => { cancelled = true; };
+  }, [runId, taskId]);
 
   return (
     <div className="collection-page">
       <header className="collection-header">
-        <Link className="outline-action" href="/?modal=1">返回</Link>
+        <Link className="outline-action" href="/">返回首页</Link>
         <div>
           <p className="section-kicker">COLLECTED PROJECTS</p>
-          <h1>收集到的项目：</h1>
+          <h1>本次运行的项目</h1>
+          {run && <p>{run.query} · run_id: {run.run_id}</p>}
         </div>
-        <span className="storage-status">SQLite 已保存</span>
+        <span className="storage-status">{run ? `task_id: ${run.task_id}` : "SQLite 持久化结果"}</span>
       </header>
 
       <main className="collection-main">
-        {loading && <div className="status-panel">正在从本地后端读取项目…</div>}
-        {error && <div className="status-panel error-panel">{error}</div>}
-        {!loading && !error && (
+        {loading && <div className="status-panel" role="status">正在从本地后端读取本次运行…</div>}
+        {error && <div className="status-panel error-panel" role="alert">{error}</div>}
+        {!loading && !error && projects.length === 0 && (
+          <div className="status-panel empty-panel" role="status">
+            本次真实运行已完成，但没有发现符合条件的项目。系统没有生成替代项目。
+          </div>
+        )}
+        {!loading && !error && projects.length > 0 && (
           <ol className="project-list">
             {projects.map((project, index) => (
               <li className="project-row" key={project.project_id}>
@@ -50,7 +94,10 @@ export default function ProjectsPage() {
                   <div><dt>发布网址</dt><dd><a href={project.url} target="_blank" rel="noreferrer">{project.url}</a></dd></div>
                   <div><dt>项目</dt><dd>{project.title}</dd></div>
                 </dl>
-                <Link className="solid-action row-action" href={`/projects/${project.project_id}?run=${encodeURIComponent(runId)}`}>
+                <Link
+                  className="solid-action row-action"
+                  href={`/projects/${encodeURIComponent(project.project_id)}?run=${encodeURIComponent(runId)}&task=${encodeURIComponent(taskId)}`}
+                >
                   具体信息
                 </Link>
               </li>
@@ -60,11 +107,23 @@ export default function ProjectsPage() {
       </main>
 
       <footer className="collection-footer">
-        <button className="outline-action" type="button" disabled title="模拟阶段暂未接入 Word 生成">
-          下载成 Word
-        </button>
-        <span>当前为模拟阶段，下载功能将在报告模块接入。</span>
+        {report?.status === "available" && report.download_url ? (
+          <a className="outline-action" href={resolveApiUrl(report.download_url)}>下载本次 Word</a>
+        ) : (
+          <span className="outline-action report-unavailable" aria-disabled="true">Word 暂不可下载</span>
+        )}
+        <span>{reportStatusText(report)}</span>
+        <Link className="outline-action" href="/reports">查看报告历史</Link>
       </footer>
     </div>
   );
+}
+
+
+function reportStatusText(report: ReportView | null): string {
+  if (!report) return "正在读取报告状态。";
+  if (report.status === "available") return `报告已生成：${report.filename}`;
+  if (report.status === "not_generated") return "本次运行没有生成新报告。";
+  if (report.status === "missing") return "报告记录存在，但文件已丢失。";
+  return report.error ?? "报告生成失败。";
 }

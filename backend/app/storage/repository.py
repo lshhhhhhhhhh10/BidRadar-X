@@ -836,6 +836,42 @@ class Repository:
             ).fetchall()
         return [json.loads(row["result_json"]) for row in rows]
 
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        with connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return json.loads(row["result_json"]) if row is not None else None
+
+    def list_report_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        with connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT run_id, task_id, status, result_json, created_at
+                FROM runs
+                ORDER BY created_at DESC, run_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            result = json.loads(row["result_json"])
+            items.append(
+                {
+                    "run_id": row["run_id"],
+                    "task_id": row["task_id"],
+                    "query": result.get("query", ""),
+                    "frequency": result.get("frequency", "once"),
+                    "run_status": row["status"],
+                    "created_at": row["created_at"],
+                    "project_count": len(result.get("projects", [])),
+                    "report": result.get("report"),
+                }
+            )
+        return items
+
     def save_project_profiles(self, run_id: str, profiles: list[dict[str, Any]]) -> None:
         with connect() as connection:
             connection.executemany(

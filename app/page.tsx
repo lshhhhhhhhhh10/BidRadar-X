@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { frequencyToApi, runTask, saveRunContext, type ExtractedFields } from "@/lib/tender-api";
+import { frequencyToApi, runTask, type ExtractedFields } from "@/lib/tender-api";
 
 const EMPTY_FIELD = "无（可编辑）";
 
@@ -93,6 +93,7 @@ export default function Home() {
   const [recommendationOffset, setRecommendationOffset] = useState(0);
   const [collecting, setCollecting] = useState(false);
   const [collectionError, setCollectionError] = useState("");
+  const [collectionSuccess, setCollectionSuccess] = useState("");
   const [fields, setFields] = useState<ExtractedFields>({
     subject: EMPTY_FIELD,
     region: EMPTY_FIELD,
@@ -107,21 +108,6 @@ export default function Home() {
     updateClock();
     const timer = window.setInterval(updateClock, 1000);
     return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("modal") !== "1") return;
-    const savedQuery = sessionStorage.getItem("tender-query");
-    const savedFields = sessionStorage.getItem("tender-fields");
-    if (savedQuery) setQuery(savedQuery);
-    if (savedFields) {
-      try {
-        setFields(JSON.parse(savedFields) as ExtractedFields);
-      } catch {
-        // Ignore malformed prototype session state and keep editable defaults.
-      }
-    }
-    setModalOpen(true);
   }, []);
 
   useEffect(() => {
@@ -159,13 +145,22 @@ export default function Home() {
   }
 
   async function startCollection() {
-    const effectiveQuery = query.trim() || "最近1个月安徽省区域内的服务器招标信息都有哪些？";
+    const effectiveQuery = query.trim();
+    if (!effectiveQuery) {
+      setCollectionError("请输入要查询的招投标主题或条件。");
+      return;
+    }
     setCollecting(true);
     setCollectionError("");
+    setCollectionSuccess("");
     try {
       const result = await runTask(effectiveQuery, frequencyToApi(fields.frequency));
-      saveRunContext(result.run_id, effectiveQuery, fields);
-      window.location.assign(`/projects?run=${encodeURIComponent(result.run_id)}`);
+      setCollectionSuccess("任务运行成功，正在打开本次真实结果…");
+      window.setTimeout(() => {
+        window.location.assign(
+          `/projects?run=${encodeURIComponent(result.run_id)}&task=${encodeURIComponent(result.task_id)}`,
+        );
+      }, 50);
     } catch (reason) {
       setCollectionError(reason instanceof Error ? reason.message : "本地后端暂时无法完成收集任务");
       setCollecting(false);
@@ -227,7 +222,7 @@ export default function Home() {
         }}>
           <section className="extraction-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
             <div className="modal-heading">
-              <p className="section-kicker">MOCK AI EXTRACTION</p>
+              <p className="section-kicker">LOCAL RULE EXTRACTION</p>
               <h2 id="modal-title">请确认识别结果</h2>
               <p>以下内容由前端关键词规则模拟提取，所有字段均可修改。</p>
             </div>
@@ -249,6 +244,7 @@ export default function Home() {
               ))}
             </div>
             {collectionError && <p className="modal-error" role="alert">{collectionError}</p>}
+            {collectionSuccess && <p className="modal-success" role="status">{collectionSuccess}</p>}
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={() => setModalOpen(false)}>返回修改</button>
               <button className="primary-button" type="button" onClick={startCollection} disabled={collecting}>

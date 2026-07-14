@@ -7,7 +7,6 @@ from pathlib import Path
 import shutil
 import time
 from typing import Any
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from ..schemas.tender import (
@@ -46,7 +45,7 @@ class Publisher:
             if historical.get("artifact_uri"):
                 historical_report = {
                     "filename": historical["artifact_uri"],
-                    "download_url": f"/reports/{quote(historical['artifact_uri'])}",
+                    "download_url": f"/api/reports/{historical['delivery_fingerprint']}/download",
                     "delivery_fingerprint": historical["delivery_fingerprint"],
                 }
             return {
@@ -132,7 +131,7 @@ class Publisher:
             "status": "generated",
             "delivery_type": delivery_type,
             "filename": report_path.name,
-            "download_url": f"/reports/{quote(report_path.name)}",
+            "download_url": f"/api/reports/{delivery_fingerprint}/download",
             "format": "docx",
             "report_scope": report_scope,
             "notice_count": len(notices),

@@ -28,10 +28,28 @@ test("server-renders the local intelligence workbench", async () => {
 });
 
 
-test("server-renders the collected projects page and reserved reports page", async () => {
+test("server-renders the real project-result and report-history shells", async () => {
   const projects = await (await render("/projects")).text();
   const reports = await (await render("/reports")).text();
-  assert.match(projects, /收集到的项目/);
-  assert.match(projects, /下载成 Word/);
-  assert.match(reports, /报告、增量与长期记忆/);
+  assert.match(projects, /本次运行的项目/);
+  assert.match(projects, /下载本次 Word|Word 暂不可下载/);
+  assert.match(reports, /真实运行与报告历史/);
+  assert.match(reports, /来自本地 SQLite/);
+  assert.doesNotMatch(reports, /具体功能将在第三阶段确定/);
+});
+
+
+test("server-renders URL context into dynamic project navigation", async () => {
+  const project = await (
+    await render("/projects/project-real?run=run-real&task=task-real")
+  ).text();
+  const modulePage = await (
+    await render("/projects/project-real/module-real?run=run-real&task=task-real")
+  ).text();
+
+  assert.match(project, /projects\?run=run-real(?:&|&amp;)task=task-real/);
+  assert.match(
+    modulePage,
+    /projects\/project-real\?run=run-real(?:&|&amp;)task=task-real/,
+  );
 });

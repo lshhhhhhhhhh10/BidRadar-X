@@ -1,6 +1,5 @@
 import unittest
 from unittest.mock import patch
-from urllib.parse import unquote
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -42,7 +41,10 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(report["source_count"], 3)
         self.assertEqual(len(report["successful_sources"]), 2)
         self.assertEqual(len(report["failed_sources"]), 1)
-        self.assertEqual(unquote(report["download_url"]), f"/reports/{report['filename']}")
+        self.assertEqual(
+            report["download_url"],
+            f"/api/reports/{report['delivery_fingerprint']}/download",
+        )
 
         download = client.get(report["download_url"])
         self.assertEqual(download.status_code, 200)
