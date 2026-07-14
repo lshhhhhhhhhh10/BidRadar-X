@@ -1,0 +1,99 @@
+[
+  {
+    "notice_id": "fixture-notice-001",
+    "notice_type": "tender",
+    "title": "通用计算设备采购公告",
+    "published_at": "2026-07-14T09:00:00+08:00",
+    "source": {
+      "source_id": "fixture-source-a",
+      "source_name": "示例公共资源平台",
+      "source_url": "https://example.com/notices/001",
+      "publication_role": "original"
+    },
+    "core_content": "采购通用计算设备，交付范围及技术参数以公告附件为准。",
+    "attachments": [
+      {
+        "attachment_id": "fixture-attachment-001",
+        "name": "采购需求.pdf",
+        "url": "https://example.com/files/requirements-001.pdf",
+        "media_type": "application/pdf"
+      },
+      {
+        "attachment_id": "fixture-attachment-002",
+        "name": null,
+        "url": "https://example.com/files/notice-001.docx",
+        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      }
+    ],
+    "raw_content_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "notice_stable_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "project_stable_fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "fetched_at": "2026-07-14T09:05:00+08:00",
+    "evidence": [
+      {
+        "evidence_id": "fixture-evidence-001",
+        "field_path": "requirement_sections.technical.facts.technical_standard",
+        "source_url": "https://example.com/files/requirements-001.pdf",
+        "attachment_id": "fixture-attachment-001",
+        "document_name": "采购需求.pdf",
+        "page_number": 3,
+        "section": "技术要求",
+        "quote": "设备技术参数以采购需求文件为准。",
+        "fetched_at": "2026-07-14T09:05:00+08:00"
+      }
+    ],
+    "requirement_sections": [
+      {
+        "section_id": "technical",
+        "title": "技术与服务要求",
+        "summary": "以下内容来自采购需求附件。",
+        "facts": [
+          {
+            "label": "技术标准",
+            "value": "按采购需求文件列明的参数执行",
+            "unknown_reason": null,
+            "evidence_ids": ["fixture-evidence-001"]
+          },
+          {
+            "label": "售后响应时间",
+            "value": null,
+            "unknown_reason": "源文件未披露",
+            "evidence_ids": []
+          }
+        ],
+        "tables": [
+          {
+            "title": "技术参数矩阵",
+            "columns": ["项目", "甲方要求值"],
+            "rows": [
+              {
+                "cells": ["计算设备", "按附件参数表执行"],
+                "evidence_ids": ["fixture-evidence-001"]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "notice_id": "fixture-notice-002",
+    "notice_type": "correction",
+    "title": "通用计算设备采购更正公告",
+    "published_at": "2026-07-13T16:30:00+08:00",
+    "source": {
+      "source_id": "fixture-source-b",
+      "source_name": "示例采购公告平台",
+      "source_url": "https://example.org/notices/002",
+      "publication_role": "original"
+    },
+    "core_content": "本公告仅更正开标地点，其他已披露内容保持不变。",
+    "attachments": [],
+    "raw_content_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "notice_stable_fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "project_stable_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "fetched_at": "2026-07-13T16:35:00+08:00",
+    "evidence": [],
+    "requirement_sections": []
+  }
+]

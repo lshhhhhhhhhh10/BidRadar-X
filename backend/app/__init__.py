@@ -1,0 +1,1 @@
+"""Local tender intelligence backend."""
