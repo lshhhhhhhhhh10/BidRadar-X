@@ -88,17 +88,19 @@ flowchart LR
 
 - 仓库：`https://github.com/lshhhhhhhhhh10/BidRadar-X`
 - 远端默认分支：`main`
-- 远端 `main`（调查时）：`37a87bb95770c56daac8282f111ea9a97d3ba15c`
+- 当前可信 `main`：`3b410d3fdf319b7cb862f7b18efea74e153317f6`
+- 原远端基线归档：`archive/application-baseline-20260713` → `37a87bb95770c56daac8282f111ea9a97d3ba15c`
+- C01 交接点归档：`archive/c01-handoff-20260715` → `3b410d3fdf319b7cb862f7b18efea74e153317f6`
 - C01 调查前本地 HEAD：`b2cac4befb3874e0abd70f3a60854d8afb470aed`
-- 本地恢复历史的根：`169698c`；远端 `main` 的根：`37a87bb`
-- `git merge-base b2cac4b origin/main` 不存在；本地独有 5 个提交，远端独有 1 个提交，属于**历史不相关**。
-- C01 本地/远端可信分支：`recovery/c01-local-project-20260715`
+- 本地恢复历史的根：`169698c`；旧远端基线的根：`37a87bb`
+- C01 调查时，`b2cac4b` 与旧远端基线 `37a87bb` 没有共同祖先；两边分别独有 5 个和 1 个提交，属于**历史不相关**。
+- C01 原可信分支已由 C02 提升为默认 `main`
 - C01 提交主题：`docs: reconcile roadmap and team handoff`
-- 当前仓库级提交身份是恢复用的 `BidRadar-X local recovery <bidradar-x@local.invalid>`，不是个人 GitHub 身份；不影响保存历史，但提交不会自动关联学生账号。每名学生应在自己的电脑配置本人 GitHub 已验证邮箱或 GitHub noreply 邮箱，不共享凭据。
+- C02 已把当前工作副本的仓库级提交身份改为已认证 GitHub 账号的 noreply 身份；每名学生仍应在自己的电脑配置本人 GitHub 已验证邮箱或 GitHub noreply 邮箱，不共享凭据，也不要沿用其他成员身份。
 
-历史不相关意味着：两个历史都必须保留，不能 force push `main`，不能自动执行 `--allow-unrelated-histories`，也不能创建看似正常但无法比较的虚假 PR。C01 分支包含本地恢复项目和本次交接材料；远端 `main` 仍保留原远端基线。后续要把哪条历史变成正式主线，必须由两名队员在 GitHub 上单独决策。
+历史不相关意味着两个历史必须分别保留，不能使用 `--allow-unrelated-histories` 拼接。2026-07-15 已完成正式主线决策：可信恢复历史成为新的默认 `main`，原远端基线改为归档分支；全程没有 force push，也没有改写任何提交。今后的功能分支和 PR 都以新 `main` 为基线。
 
-认证调查中 `gh` 未安装；普通 Git 凭据可以读取远端。公共 API 无认证返回 404，而认证 Git 访问成功，因此仓库**推测为私有**，但当前连接器未返回可靠的可见性/维护权限字段。队友 collaborator 状态也无法可靠验证，C01 没有擅自邀请或改变权限。
+当前已使用认证后的 GitHub CLI 实时确认仓库为私有仓库，默认分支为 `main`。GitHub 连接器仍没有该私有仓库权限；队友 collaborator 状态尚未单独核验，本次没有邀请或改变成员权限。
 
 每次接手都要重新验证，不要只相信上面的快照：
 
@@ -111,22 +113,22 @@ git log --oneline --decorate --graph --all
 git rev-parse HEAD
 git config --get user.name
 git config --get user.email
-git ls-remote origin recovery/c01-local-project-20260715
+git ls-remote origin main
 ```
 
 只有本地 HEAD 与 `git ls-remote` 的分支 SHA 完全一致，才能说“已上传 GitHub”。
 
 ## 5. 第一次克隆
 
-在 GitHub 完成访问授权后，新电脑使用已经验证的恢复/交接分支：
+在 GitHub 完成访问授权后，新电脑直接克隆默认 `main`：
 
 ```powershell
-git clone --branch recovery/c01-local-project-20260715 https://github.com/lshhhhhhhhhh10/BidRadar-X.git BidRadar-X
+git clone https://github.com/lshhhhhhhhhh10/BidRadar-X.git BidRadar-X
 Set-Location BidRadar-X
 git remote -v
 git branch -vv
 git rev-parse HEAD
-git ls-remote origin recovery/c01-local-project-20260715
+git ls-remote origin main
 ```
 
 若仓库是私有的，404 或认证失败通常表示当前 GitHub 账号尚未获权，不要关闭 TLS、共享 Token 或改用 ZIP 绕过。仓库所有者应在 GitHub 网页执行：`Settings → Collaborators and teams → Add people → 输入队友准确用户名 → 邀请`，给予至少可创建分支和 PR 的权限；不要共享所有者密码或 Token。
@@ -214,7 +216,7 @@ C01 基线结果：短隔离路径后端 `125/125` 通过，compileall 通过；
 ## 10. 队友接手后的前 30 分钟
 
 - [ ] 按真实仓库 URL clone 或打开已有 clone，不接收 ZIP 作为长期协作源。
-- [ ] 运行 Git 状态、fetch、分支图、本地/远端 SHA 比对；确认在 `recovery/c01-local-project-20260715`。
+- [ ] 运行 Git 状态、fetch、分支图、本地/远端 SHA 比对；确认在最新 `main`，且开发前另建任务分支。
 - [ ] 阅读 README、ROADMAP、WORK_PLAN、TEAM_HANDOFF、GITHUB_WORKFLOW 和 C01 日志。
 - [ ] 用自己的话复述产品两类用户、TASK-01～10、原 TASK-11～14 去向、F01/F02 与下一入口。
 - [ ] 在新短路径安装环境并运行后端 125 个、前端 3 个、lint、build、TypeScript 基线。

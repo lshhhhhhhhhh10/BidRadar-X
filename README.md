@@ -4,19 +4,19 @@ BidRadar-X 是面向投标方和招标方的可解释招投标情报工作台。
 
 ## 当前 GitHub 入口
 
-当前可信开发与交接分支是：
+当前可信默认主线是：
 
 ```text
-recovery/c01-local-project-20260715
+main
 ```
 
 首次接手请使用：
 
 ```powershell
-git clone --branch recovery/c01-local-project-20260715 https://github.com/lshhhhhhhhhh10/BidRadar-X.git BidRadar-X
+git clone https://github.com/lshhhhhhhhhh10/BidRadar-X.git BidRadar-X
 ```
 
-远端默认分支 `main` 与当前本地恢复历史没有共同祖先，仍保留比赛报名与协作基线的旧内容。最新代码、路线图和本 README 已发布到上述恢复/交接分支，但**尚未合并到 `main`**。在团队决定正式主线前，不得 force push、覆盖 `main` 或自动合并无关历史。
+2026-07-15 已将可信恢复历史 `3b410d3` 提升为默认 `main`，没有 force push，也没有合并无关历史。原报名与协作基线 `37a87bb` 保留在 `archive/application-baseline-20260713`，C01 交接点保留在 `archive/c01-handoff-20260715`。今后所有任务从最新 `main` 创建独立分支并通过 Draft PR 回到 `main`；禁止直接在 `main` 开发。
 
 ## 当前项目进度
 
