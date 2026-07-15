@@ -56,6 +56,21 @@
 
 - 从最新 `main` 创建 `feat/r01-ccgp-collector`，按 R01 日志和 Draft PR 流程推进。
 
+### 2026-07-15 11:25 — 文档分支发布
+
+#### 已完成
+
+- 在 `docs/c02-mainline-promotion` 提交 C02 文档，首个提交为 `cab98ae`。
+- 推送后比较本地与远端分支 SHA，二者完全一致。
+- 创建 Draft PR #5，base 为 `main`，head 为 `docs/c02-mainline-promotion`。
+- 未自动合并 PR；等待另一名成员复核后再由约定负责人合并。
+
+#### 验证结果
+
+- GitHub PR：`https://github.com/lshhhhhhhhhh10/BidRadar-X/pull/5`
+- PR 状态：OPEN、Draft。
+- 分支范围：仅包含本日志声明的 5 个文档文件。
+
 ## 安全检查
 
 - [x] 未将账号写入仓库或日志。
