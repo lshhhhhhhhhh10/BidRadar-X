@@ -24,6 +24,10 @@ test("server-renders the local intelligence workbench", async () => {
   assert.match(html, /下一步/);
   assert.match(html, /热门推荐/);
   assert.match(html, /换一批/);
+  assert.match(html, /剑鱼（未登录）/);
+  assert.match(html, /添加信息来源网站/);
+  assert.match(html, /href="https:\/\/www\.jianyu360\.com\/"/);
+  assert.match(html, /target="_blank"/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 

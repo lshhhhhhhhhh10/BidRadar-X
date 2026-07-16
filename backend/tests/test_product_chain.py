@@ -91,18 +91,22 @@ class ProductChainApiTest(unittest.TestCase):
         self.assertEqual(projects_response.status_code, 200, projects_response.text)
         projects = projects_response.json()["items"]
         self.assertEqual(len(projects), 1)
-        self.assertEqual(projects[0]["title"], "某单位服务器采购公告")
+        project = projects[0]
+        self.assertEqual(project["title"], "某单位服务器采购公告")
+        self.assertFalse(project["details_loaded"])
+        self.assertEqual(project["module_count"], 0)
         self.assertEqual(
-            projects[0]["url"],
+            project["url"],
             "https://public-a.gov.cn/notices/real-001",
         )
 
         detail_response = self.client.get(
-            f"/api/runs/{run['run_id']}/projects/{projects[0]['project_id']}"
+            f"/api/runs/{run['run_id']}/projects/{project['project_id']}"
         )
         self.assertEqual(detail_response.status_code, 200, detail_response.text)
         detail = detail_response.json()
         self.assertEqual(detail["run_id"], run["run_id"])
+        self.assertTrue(detail["details_loaded"])
         self.assertEqual(detail["summary"], "采购服务器及配套服务，来源记录 a。")
         self.assertEqual(detail["modules"], [])
         self.assertEqual(
@@ -181,7 +185,7 @@ class ProductChainApiTest(unittest.TestCase):
         self.assertEqual(len(failed_sources), 1)
         self.assertEqual(failed_sources[0]["error"], "来源采集失败，请稍后重试。")
 
-    def test_empty_run_is_a_real_empty_project_list(self) -> None:
+    def test_empty_run_does_not_invent_projects_or_urls(self) -> None:
         empty_source = SuccessfulSource(source_metadata("empty", "空结果公开来源"), [])
         with patch.object(source_select, "SOURCE_ADAPTERS", [empty_source]):
             run_response = self.client.post(

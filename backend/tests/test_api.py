@@ -14,7 +14,7 @@ class ApiTest(unittest.TestCase):
     def test_run_returns_downloadable_docx_and_source_outcomes(self) -> None:
         client = TestClient(app)
         adapters = isolated_source_set()
-        query = f"查询 2026-07-14 全国服务器采购公告 {uuid4()}"
+        query = f"查询全国服务器采购公告 {uuid4()}"
 
         with (
             patch.object(source_select, "SOURCE_ADAPTERS", adapters),

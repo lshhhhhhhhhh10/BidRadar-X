@@ -111,10 +111,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function runTask(query: string, frequency: "once" | "daily" | "weekly") {
+export async function runTask(
+  query: string,
+  frequency: "once" | "daily" | "weekly",
+  overrides?: { subject?: string; region?: string },
+) {
   return request<RunTaskResponse>("/tasks/run", {
     method: "POST",
-    body: JSON.stringify({ query, frequency }),
+    body: JSON.stringify({ query, frequency, ...overrides }),
   });
 }
 
@@ -161,7 +165,7 @@ export function resolveApiUrl(path: string): string {
 }
 
 export function frequencyToApi(value: string): "once" | "daily" | "weekly" {
-  if (value.includes("每日")) return "daily";
+  if (value.includes("每日") || value.includes("每天")) return "daily";
   if (value.includes("每周")) return "weekly";
   return "once";
 }

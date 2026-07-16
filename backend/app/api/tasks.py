@@ -4,7 +4,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import APIRouter, HTTPException
 
-from .projects import build_source_project_profiles
+from .projects import build_source_project_summaries
 from ..schemas.task import TaskRunRequest, TaskRunResponse
 from ..services.task_runner import TaskRunner
 from ..storage.repository import Repository
@@ -26,11 +26,25 @@ def workflow_definition() -> dict[str, list[str]]:
 
 @router.post("/tasks/run", response_model=TaskRunResponse)
 async def run_task(request: TaskRunRequest) -> dict:
-    task_id = str(uuid5(NAMESPACE_URL, f"{request.query}|{request.frequency}"))
+    task_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "|".join(
+                (
+                    request.query,
+                    request.frequency,
+                    request.subject or "",
+                    request.region or "",
+                )
+            ),
+        )
+    )
     state = await TaskRunner().run(
         task_id=task_id,
         query=request.query,
         frequency=request.frequency,
+        requested_subject=request.subject,
+        requested_region=request.region,
     )
     if state["status"] != "completed":
         raise HTTPException(
@@ -42,7 +56,7 @@ async def run_task(request: TaskRunRequest) -> dict:
         )
     Repository().save_project_profiles(
         state["run_id"],
-        build_source_project_profiles(state),
+        build_source_project_summaries(state),
     )
     return {
         "task_id": state["task_id"],
