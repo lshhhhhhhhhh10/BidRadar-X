@@ -7,12 +7,21 @@ from ..storage.repository import Repository
 
 router = APIRouter(prefix="/api", tags=["projects"])
 
-
 def build_source_project_profiles(state: dict) -> list[dict]:
     return [
         _build_project_profile(state["run_id"], project)
         for project in state.get("projects", [])
     ]
+
+
+def build_source_project_summaries(state: dict) -> list[dict]:
+    """Build the lightweight list view; requirement modules are loaded on click."""
+
+    summaries: list[dict] = []
+    for project in state.get("projects", []):
+        profile = _build_project_profile(state["run_id"], project)
+        summaries.append({**profile, "details_loaded": False, "modules": []})
+    return summaries
 
 
 def _build_project_profile(run_id: str, project: dict) -> dict:
@@ -52,6 +61,7 @@ def _build_project_profile(run_id: str, project: dict) -> dict:
         "deadline": primary.get("deadline"),
         "summary": primary.get("core_content") or "公告未提供正文摘要",
         "evidence_count": len(evidence),
+        "details_loaded": True,
         "modules": modules,
     }
 
@@ -109,17 +119,30 @@ def list_projects(run_id: str) -> dict[str, list[dict]]:
 
 @router.get("/runs/{run_id}/projects/{project_id}")
 def get_project(run_id: str, project_id: str) -> dict:
-    profile = Repository().get_project_profile(run_id, project_id)
+    repository = Repository()
+    profile = repository.get_project_profile(run_id, project_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="未找到该项目或任务运行记录")
+    if profile.get("details_loaded") is False:
+        run = repository.get_run(run_id)
+        source_project = next(
+            (
+                item
+                for item in (run or {}).get("projects", [])
+                if item.get("project_id") == project_id
+            ),
+            None,
+        )
+        if source_project is None:
+            raise HTTPException(status_code=404, detail="未找到该项目的来源记录")
+        profile = _build_project_profile(run_id, source_project)
+        repository.save_project_profiles(run_id, [profile])
     return profile
 
 
 @router.get("/runs/{run_id}/projects/{project_id}/modules/{module_id}")
 def get_project_module(run_id: str, project_id: str, module_id: str) -> dict:
-    profile = Repository().get_project_profile(run_id, project_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail="未找到该项目或任务运行记录")
+    profile = get_project(run_id, project_id)
     module = next((item for item in profile["modules"] if item["id"] == module_id), None)
     if module is None:
         raise HTTPException(status_code=404, detail="未找到该要求模块")

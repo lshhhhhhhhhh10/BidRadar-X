@@ -6,6 +6,8 @@ class WorkflowState(TypedDict, total=False):
     run_id: str
     query: str
     frequency: str
+    requested_subject: str | None
+    requested_region: str | None
     status: str
     task_spec: dict[str, Any]
     monitor_plan: dict[str, Any]

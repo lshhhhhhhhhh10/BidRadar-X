@@ -13,12 +13,20 @@ import {
   type ReportView,
   type RunSummary,
 } from "@/lib/tender-api";
+import {
+  SHANGHAI_PROPERTY_DEMO_ID,
+  SHANGHAI_PROPERTY_DEMO_PROJECTS,
+  SHANGHAI_PROPERTY_DEMO_REPORT,
+  SHANGHAI_PROPERTY_DEMO_RUN,
+} from "@/lib/demo-tenders";
 
 
 export default function ProjectsPage() {
   const searchParams = useSearchParams();
   const runId = searchParams.get("run") ?? "";
   const taskId = searchParams.get("task") ?? "";
+  const demoId = searchParams.get("demo") ?? "";
+  const isDemo = demoId === SHANGHAI_PROPERTY_DEMO_ID;
   const [run, setRun] = useState<RunSummary | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [report, setReport] = useState<ReportView | null>(null);
@@ -35,6 +43,15 @@ export default function ProjectsPage() {
         setRun(null);
         setProjects([]);
         setReport(null);
+      }
+      if (isDemo) {
+        if (!cancelled) {
+          setRun(SHANGHAI_PROPERTY_DEMO_RUN);
+          setProjects(SHANGHAI_PROPERTY_DEMO_PROJECTS);
+          setReport(SHANGHAI_PROPERTY_DEMO_REPORT);
+          setLoading(false);
+        }
+        return;
       }
       if (!runId || !taskId) {
         if (!cancelled) {
@@ -62,7 +79,7 @@ export default function ProjectsPage() {
     }
     void load();
     return () => { cancelled = true; };
-  }, [runId, taskId]);
+  }, [isDemo, runId, taskId]);
 
   return (
     <div className="collection-page">
@@ -71,9 +88,13 @@ export default function ProjectsPage() {
         <div>
           <p className="section-kicker">COLLECTED PROJECTS</p>
           <h1>本次运行的项目</h1>
-          {run && <p>{run.query} · run_id: {run.run_id}</p>}
+          {run && (
+            <p>{isDemo ? run.query : `${run.query} · run_id: ${run.run_id}`}</p>
+          )}
         </div>
-        <span className="storage-status">{run ? `task_id: ${run.task_id}` : "SQLite 持久化结果"}</span>
+        <span className="storage-status">
+          {isDemo ? "10 条 · 合成演示数据" : run ? `task_id: ${run.task_id}` : "SQLite 持久化结果"}
+        </span>
       </header>
 
       <main className="collection-main">
@@ -91,12 +112,16 @@ export default function ProjectsPage() {
                 <span className="project-index">{index + 1}</span>
                 <dl className="project-row-data">
                   <div><dt>发布时间</dt><dd>{project.published_at.slice(0, 10)}</dd></div>
-                  <div><dt>发布网址</dt><dd><a href={project.url} target="_blank" rel="noreferrer">{project.url}</a></dd></div>
+                  <div><dt>来源</dt><dd>{project.source_name}</dd></div>
+                  <div><dt>投标截止</dt><dd>{project.deadline ? project.deadline.slice(0, 16).replace("T", " ") : "以原公告为准"}</dd></div>
+                  <div><dt>{isDemo ? "数据性质" : "发布网址"}</dt><dd>{isDemo ? "合成演示，不代表真实公告" : <a href={project.url} target="_blank" rel="noreferrer">{project.url}</a>}</dd></div>
                   <div><dt>项目</dt><dd>{project.title}</dd></div>
                 </dl>
                 <Link
                   className="solid-action row-action"
-                  href={`/projects/${encodeURIComponent(project.project_id)}?run=${encodeURIComponent(runId)}&task=${encodeURIComponent(taskId)}`}
+                  href={isDemo
+                    ? `/projects/${encodeURIComponent(project.project_id)}?demo=${encodeURIComponent(SHANGHAI_PROPERTY_DEMO_ID)}`
+                    : `/projects/${encodeURIComponent(project.project_id)}?run=${encodeURIComponent(runId)}&task=${encodeURIComponent(taskId)}`}
                 >
                   具体信息
                 </Link>
@@ -107,12 +132,15 @@ export default function ProjectsPage() {
       </main>
 
       <footer className="collection-footer">
+        {isDemo && (
+          <Link className="outline-action" href="/reports/demo-shanghai-property">在线查看 Word</Link>
+        )}
         {report?.status === "available" && report.download_url ? (
           <a className="outline-action" href={resolveApiUrl(report.download_url)}>下载本次 Word</a>
         ) : (
           <span className="outline-action report-unavailable" aria-disabled="true">Word 暂不可下载</span>
         )}
-        <span>{reportStatusText(report)}</span>
+        <span>{isDemo ? "已汇总 10 条项目及八大模块，下载时按当前时间命名。" : reportStatusText(report)}</span>
         <Link className="outline-action" href="/reports">查看报告历史</Link>
       </footer>
     </div>

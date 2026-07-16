@@ -174,6 +174,7 @@ class TenderNotice(ContractModel):
 
     notice_id: str = Field(min_length=1)
     notice_type: Literal["tender", "correction", "award", "cancellation", "other"]
+    opportunity_kind: Literal["prequalification", "tender", "correction"] | None = None
     project_code: str | None = None
     title: str = Field(min_length=1)
     published_at: AwareDatetime
@@ -212,6 +213,7 @@ class TenderNotice(ContractModel):
             field_path
             for field_path, value in {
                 "project_code": self.project_code,
+                "opportunity_kind": self.opportunity_kind,
                 "region": self.region,
                 "topic_keywords": self.topic_keywords,
                 "purchaser": self.purchaser,

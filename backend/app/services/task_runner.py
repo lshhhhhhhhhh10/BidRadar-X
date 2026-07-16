@@ -21,6 +21,8 @@ class TaskRunner:
         query: str,
         frequency: str,
         run_id: str | None = None,
+        requested_subject: str | None = None,
+        requested_region: str | None = None,
     ) -> dict[str, Any]:
         run_id = run_id or str(uuid4())
         self.repository.create_task(task_id, query, frequency)
@@ -29,6 +31,8 @@ class TaskRunner:
             "run_id": run_id,
             "query": query,
             "frequency": frequency,
+            "requested_subject": requested_subject,
+            "requested_region": requested_region,
             "status": "running",
             "steps": [],
             "funnel": {},

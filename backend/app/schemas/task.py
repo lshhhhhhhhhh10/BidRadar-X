@@ -20,6 +20,8 @@ WeeklyDay = Literal[
 class TaskRunRequest(BaseModel):
     query: str = Field(min_length=2, max_length=500)
     frequency: Frequency = "once"
+    subject: str | None = Field(default=None, max_length=120)
+    region: str | None = Field(default=None, max_length=50)
 
 
 class TaskRunResponse(BaseModel):

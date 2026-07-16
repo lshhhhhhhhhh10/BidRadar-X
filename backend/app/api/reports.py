@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime
 import re
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
+from ..services.demo_shanghai_property import (
+    DEMO_QUERY,
+    demo_notices,
+    demo_notices_for_scheduled_run,
+)
+from ..services.docx_publisher import DocxPublisher, build_report_filename
 from ..services.publisher import REPORT_DIR
 from ..storage.repository import Repository
 
@@ -35,7 +43,8 @@ def get_run_report(run_id: str) -> dict:
 def download_report(delivery_fingerprint: str) -> FileResponse:
     if re.fullmatch(r"[0-9a-f]{64}", delivery_fingerprint) is None:
         raise HTTPException(status_code=400, detail="invalid report identifier")
-    delivery = Repository().get_delivery(delivery_fingerprint)
+    repository = Repository()
+    delivery = repository.get_delivery(delivery_fingerprint)
     if delivery is None:
         raise HTTPException(status_code=404, detail="report not found")
     if delivery["status"] not in {"generated", "delivered"}:
@@ -45,6 +54,62 @@ def download_report(delivery_fingerprint: str) -> FileResponse:
         raise HTTPException(status_code=409, detail="report artifact is invalid")
     if not report_path.is_file():
         raise HTTPException(status_code=410, detail="report file is missing")
+    return FileResponse(
+        report_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=_download_filename(repository, delivery, report_path.name),
+    )
+
+
+@router.get("/demo/reports/shanghai-property/download")
+def download_shanghai_property_demo_report() -> FileResponse:
+    """Generate the judged demo report with the required timestamped filename."""
+
+    generated_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    output_dir = REPORT_DIR / "demo"
+    report_path = output_dir / build_report_filename(DEMO_QUERY, generated_at)
+    if not report_path.is_file():
+        try:
+            report_path = DocxPublisher(
+                output_dir=output_dir,
+                clock=lambda: generated_at,
+            ).publish(DEMO_QUERY, demo_notices(), report_scope="full")
+        except FileExistsError:
+            # A second browser click in the same minute reuses the immutable artifact.
+            if not report_path.is_file():
+                raise
+    return FileResponse(
+        report_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=report_path.name,
+    )
+
+
+@router.get("/demo/reports/shanghai-property/runs/{run_id}/download")
+def download_shanghai_property_incremental_report(run_id: str) -> FileResponse:
+    """Download the clean Word report containing only one run's additions."""
+
+    run = demo_notices_for_scheduled_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="demo scheduled run not found")
+    executed_at, notices = run
+    if not notices:
+        raise HTTPException(
+            status_code=409,
+            detail="本次运行没有新增公告，因此不生成重复报告。",
+        )
+
+    output_dir = REPORT_DIR / "demo" / "scheduled-runs" / run_id
+    report_path = output_dir / build_report_filename(DEMO_QUERY, executed_at)
+    if not report_path.is_file():
+        try:
+            report_path = DocxPublisher(
+                output_dir=output_dir,
+                clock=lambda: executed_at,
+            ).publish(DEMO_QUERY, notices, report_scope="incremental")
+        except FileExistsError:
+            if not report_path.is_file():
+                raise
     return FileResponse(
         report_path,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -88,9 +153,29 @@ def _report_view(repository: Repository, report: object) -> dict:
         **base,
         "status": "available",
         "delivery_fingerprint": fingerprint,
-        "filename": report_path.name,
+        "filename": _download_filename(repository, delivery, report_path.name),
         "download_url": f"/api/reports/{fingerprint}/download",
     }
+
+
+def _download_filename(
+    repository: Repository,
+    delivery: dict,
+    fallback: str,
+) -> str:
+    """Expose the competition filename while retaining unique internal storage names."""
+
+    run = repository.get_run(delivery.get("run_id", ""))
+    if not isinstance(run, dict) or not isinstance(run.get("query"), str):
+        return fallback
+    timestamp_value = delivery.get("generated_at") or delivery.get("created_at")
+    if not isinstance(timestamp_value, str):
+        return fallback
+    try:
+        timestamp = datetime.fromisoformat(timestamp_value)
+    except ValueError:
+        return fallback
+    return build_report_filename(run["query"], timestamp)
 
 
 def _safe_report_path(artifact_uri: object) -> Path | None:
