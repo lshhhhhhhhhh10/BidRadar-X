@@ -159,7 +159,7 @@ class StorageMigrationTest(StorageTestCase):
                 )
             }
 
-        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5])
+        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8])
         self.assertTrue(all(row["checksum"] for row in versions))
         self.assertTrue(
             {
@@ -176,6 +176,8 @@ class StorageMigrationTest(StorageTestCase):
                 "task_identities",
                 "publication_payload_versions",
                 "attachment_versions",
+                "spend_policy",
+                "spend_events",
             }.issubset(tables)
         )
         self.assertEqual(foreign_key_errors, [])
@@ -231,7 +233,7 @@ class StorageMigrationTest(StorageTestCase):
             {"project_stable_fingerprint", "snapshot_fingerprint", "snapshot_json", "version"}
             .issubset(columns)
         )
-        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5])
+        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8])
 
     def test_populated_v4_database_upgrades_to_v5_without_losing_history(self) -> None:
         original_apply_migrations = database_module.apply_migrations
@@ -289,7 +291,7 @@ class StorageMigrationTest(StorageTestCase):
             ).fetchone()
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5])
+        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8])
         self.assertEqual(payload_count, 1)
         self.assertEqual(attachment_version["status"], "downloaded")
         self.assertEqual(attachment_version["content_sha256"], "5" * 64)
@@ -314,7 +316,7 @@ class StorageMigrationTest(StorageTestCase):
             connection.execute("CREATE TABLE half_migrated(value TEXT)")
             raise RuntimeError("injected migration failure")
 
-        failing = Migration(6, "injected_failure", "test-checksum", fail_after_ddl)
+        failing = Migration(MIGRATIONS[-1].version + 1, "injected_failure", "test-checksum", fail_after_ddl)
         with database_module.connect() as connection:
             with self.assertRaisesRegex(RuntimeError, "injected migration failure"):
                 apply_migrations(connection, (*MIGRATIONS, failing))
@@ -331,8 +333,57 @@ class StorageMigrationTest(StorageTestCase):
                 ("still-usable", "旧库仍可用", "once", "2026-07-14T10:00:00+08:00"),
             )
 
-        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5])
+        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8])
         self.assertIsNone(half_table)
+
+    def test_v8_backfills_tombstones_for_previously_deleted_duplicate_runs(self) -> None:
+        original_apply_migrations = database_module.apply_migrations
+
+        def apply_through_v7(connection: sqlite3.Connection) -> None:
+            original_apply_migrations(connection, MIGRATIONS[:7])
+
+        with patch.object(
+            database_module,
+            "apply_migrations",
+            side_effect=apply_through_v7,
+        ):
+            repository = Repository()
+            repository.create_task("history-backfill", "查询服务器采购公告", "once")
+            state = {
+                "task_id": "history-backfill",
+                "status": "completed",
+                "query": "查询服务器采购公告",
+                "frequency": "once",
+                "projects": [],
+            }
+            repository.save_run({**state, "run_id": "history-backfill-a"})
+            repository.save_run(
+                {
+                    **state,
+                    "run_id": "history-backfill-b",
+                    "frequency": "weekly",
+                }
+            )
+            with database_module.connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO hidden_report_runs(run_id, hidden_at)
+                    VALUES (?, ?)
+                    """,
+                    ("history-backfill-a", "2026-07-17T23:51:00+08:00"),
+                )
+
+        database_module.initialize_database()
+
+        with database_module.connect() as connection:
+            hidden = connection.execute(
+                "SELECT run_id FROM hidden_report_runs ORDER BY run_id"
+            ).fetchall()
+
+        self.assertEqual(
+            [row["run_id"] for row in hidden],
+            ["history-backfill-a", "history-backfill-b"],
+        )
 
 
 class ProvenancePersistenceTest(StorageTestCase):

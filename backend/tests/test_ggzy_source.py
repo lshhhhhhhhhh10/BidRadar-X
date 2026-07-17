@@ -29,7 +29,7 @@ class GGZYDetailParserTest(unittest.TestCase):
                 "0201/20260712/abcdef0123456789.html"
             ),
             region="安徽省",
-            region_evidence_url="https://deal.ggzy.gov.cn/ds/deal/dealList_find.jsp",
+            region_evidence_url="https://www.ggzy.gov.cn/information/pubTradingInfo/getTradList",
             region_evidence_quote='{"province":"安徽省"}',
             region_evidence_locator=(
                 '{"method":"POST","source_notice_id":"abcdef0123456789",'
@@ -101,6 +101,33 @@ class GGZYDetailParserTest(unittest.TestCase):
 
 
 class GGZYSearchParserTest(unittest.TestCase):
+    def test_parses_current_official_public_api_shape(self) -> None:
+        page = parse_search_response(
+            {
+                "code": 200,
+                "ttlpage": 1,
+                "data": [
+                    {
+                        "id": "notice-current-1",
+                        "title": "某市服务器设备采购公告",
+                        "url": "/information/deal/html/a/110000/20260717/one.html",
+                        "publishTime": "2026-07-17 10:00:00",
+                        "provinceText": "北京市",
+                        "transactionSourcesPlatformText": "北京市公共资源交易平台",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(page.total_pages, 1)
+        self.assertEqual(page.results[0].region, "北京市")
+        self.assertEqual(page.results[0].source_name, "北京市公共资源交易平台")
+        self.assertTrue(page.results[0].source_url.startswith("https://www.ggzy.gov.cn/"))
+
+    def test_current_api_captcha_code_fails_loudly(self) -> None:
+        with self.assertRaises(GGZYAccessRestrictedError):
+            parse_search_response({"code": 829, "msg": "需要验证码", "data": []})
+
     def test_empty_result_fixture_is_a_valid_search_page(self) -> None:
         page = parse_search_response((FIXTURES / "search_empty.json").read_bytes())
 
@@ -186,6 +213,8 @@ class GGZYCollectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(post_calls[0][2]["DEAL_PROVINCE"], "340000")
         self.assertEqual(post_calls[0][2]["TIMEBEGIN"], "2026-07-10")
         self.assertEqual(post_calls[0][2]["TIMEEND"], "2026-07-14")
+        self.assertEqual(post_calls[0][2]["DEAL_TIME"], "06")
+        self.assertEqual(post_calls[0][2]["DEAL_STAGE"], "0001")
         self.assertEqual(notices[1].purchaser, "某区政务服务管理局")
 
     async def test_collect_follows_public_embedded_original_without_hiding_provenance(self) -> None:
@@ -255,11 +284,11 @@ class GGZYCollectionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             extracted_evidence["region"],
-            "https://deal.ggzy.gov.cn/ds/deal/dealList_find.jsp",
+            "https://www.ggzy.gov.cn/information/pubTradingInfo/getTradList",
         )
         self.assertEqual(
             extracted_evidence["source.original_source_name"],
-            "https://deal.ggzy.gov.cn/ds/deal/dealList_find.jsp",
+            "https://www.ggzy.gov.cn/information/pubTradingInfo/getTradList",
         )
         self.assertEqual(
             evidence_by_field["region"].quote,

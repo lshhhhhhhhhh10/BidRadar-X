@@ -17,6 +17,30 @@ export type ProjectSummary = {
   budget?: number | string;
   deadline?: string;
   summary: string;
+  attachments: Array<{
+    attachment_id: string;
+    name: string;
+    url: string;
+    media_type?: string | null;
+    archive_status?: "available" | "failed" | "unsupported" | null;
+    archive_error?: "source_has_no_pdf" | "access_denied" | "network_error" | "unsafe_url" | "too_large" | "not_pdf_response" | "write_failed" | "unknown" | null;
+    local_available?: boolean;
+    local_filename?: string | null;
+    reveal_url?: string | null;
+  }>;
+  bidder_insights?: Array<{
+    key: string;
+    label: string;
+    value: string;
+    source: string;
+    available: boolean;
+  }>;
+  contacts?: Array<{
+    role: string;
+    name: string;
+    phone: string;
+    source: string;
+  }>;
   evidence_count: number;
   module_count: number;
 };
@@ -52,18 +76,129 @@ export type ReportView = {
   delivery_fingerprint?: string;
   filename?: string;
   download_url?: string;
+  document_count?: number;
+  documents?: ReportDocumentView[];
   error?: string;
+};
+
+export type ReportDocumentView = {
+  document_id: string;
+  project_id: string;
+  project_title: string;
+  filename: string;
+  download_url: string;
+  notice_count: number;
+  change_type: string;
+  is_new: boolean;
+  generated_at?: string;
+  status: "available" | "missing";
+};
+
+export type AIReportFinding = {
+  text: string;
+  evidence_ids: string[];
+};
+
+export type AIReportNarrative = {
+  notice_id: string;
+  summary: string;
+  risk_points: string[];
+  next_actions: string[];
+  evidence_ids: string[];
+};
+
+export type AIReport = {
+  status: "generated" | "not_generated";
+  executive_summary?: string;
+  key_findings?: AIReportFinding[];
+  notice_narratives?: AIReportNarrative[];
 };
 
 export type ReportHistoryItem = {
   run_id: string;
   task_id: string;
   query: string;
+  display_title?: string;
   frequency: "once" | "daily" | "weekly";
   run_status: string;
   created_at: string;
   project_count: number;
   report: ReportView;
+  ai_report: AIReport;
+  projects: ProjectSummary[];
+  sources: Array<{
+    source_id: string;
+    name: string;
+    status: "success" | "failed" | "not_attempted";
+    record_count: number;
+    requires_login: boolean;
+  }>;
+};
+
+export type LiveTaskStage = {
+  id: "intent" | "expansion" | "sources" | "cleaning" | "documents";
+  number: number;
+  title: string;
+  status: "pending" | "running" | "success" | "empty" | "error";
+  summary: string;
+  details: {
+    fields?: Array<{ label: string; value: string }>;
+    original_keywords?: string[];
+    added_keywords?: string[];
+    search_phrases?: string[];
+    negative_terms?: string[];
+    sources?: Array<{
+      source_id: string;
+      name: string;
+      status: "pending" | "success" | "empty" | "failed";
+      collected_count: number;
+      relevant_count: number | null;
+      requires_login: boolean;
+      failure_reason?: string | null;
+    }>;
+    counts?: Array<{ label: string; value: number }>;
+    quality_issues?: string[];
+    report_status?: string;
+    document_count?: number;
+  };
+  ai: {
+    status: string;
+    label: string;
+    model?: string | null;
+    latency_ms?: number | null;
+    call_count: number;
+  };
+};
+
+export type LiveTask = {
+  job_id: string;
+  task_id: string;
+  run_id: string;
+  status: "running" | "pausing" | "paused" | "completed" | "empty" | "failed";
+  project_count: number;
+  stages: LiveTaskStage[];
+  error_message?: string | null;
+  updated_at: string;
+  redirect_url?: string | null;
+  subscription?: SubscriptionSummary | null;
+};
+
+export type SpendBudget = {
+  daily_limit: string;
+  spent_today: string;
+  remaining: string;
+  currency: "CNY";
+  enforced: boolean;
+};
+
+export type SubscriptionSummary = {
+  task_id: string;
+  query: string;
+  frequency: "once" | "daily" | "weekly";
+  timezone: string;
+  local_time: string;
+  next_run_at: string;
+  status: "active" | "paused" | "completed" | "failed";
 };
 
 export type RunTaskResponse = {
@@ -72,6 +207,34 @@ export type RunTaskResponse = {
   status: string;
   projects: unknown[];
   report: Record<string, unknown>;
+  ai: AIStatus;
+};
+
+export type AIStatus = {
+  enabled: boolean;
+  configured: boolean;
+  provider: string;
+  model: string;
+  endpoint: string;
+  credential_storage: string;
+  automatic?: boolean;
+  fallback?: string;
+  stages?: string[];
+  calls?: Array<Record<string, unknown>>;
+};
+
+export type SourceCatalogItem = {
+  id: string;
+  name: string;
+  category: "government" | "enterprise" | "commercial" | "overseas" | "news" | "custom";
+  category_label: string;
+  url: string;
+  host: string;
+  requires_auth: boolean;
+  status: "ready" | "limited" | "needs_auth" | "restricted";
+  status_label: string;
+  detail: string;
+  collection_mode: string;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api";
@@ -108,6 +271,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
           : `本地后端请求失败（${response.status}）`;
     throw new TenderApiError(message, response.status, detail?.code);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -119,6 +283,27 @@ export async function runTask(
   return request<RunTaskResponse>("/tasks/run", {
     method: "POST",
     body: JSON.stringify({ query, frequency, ...overrides }),
+  });
+}
+
+export async function startLiveTask(
+  query: string,
+  frequency: "once" | "daily" | "weekly",
+  overrides?: { subject?: string; region?: string },
+) {
+  return request<LiveTask>("/tasks/live", {
+    method: "POST",
+    body: JSON.stringify({ query, frequency, ...overrides }),
+  });
+}
+
+export async function getLiveTask(jobId: string) {
+  return request<LiveTask>(`/tasks/live/${encodeURIComponent(jobId)}`);
+}
+
+export async function pauseLiveTask(jobId: string) {
+  return request<LiveTask>(`/tasks/live/${encodeURIComponent(jobId)}/pause`, {
+    method: "POST",
   });
 }
 
@@ -158,6 +343,60 @@ export async function getRunReport(runId: string) {
 
 export async function listReports() {
   return request<{ items: ReportHistoryItem[] }>("/reports");
+}
+
+export async function deleteReportHistory(runId: string) {
+  return request<void>(`/reports/${encodeURIComponent(runId)}`, { method: "DELETE" });
+}
+
+export async function listSubscriptions() {
+  return request<{ items: SubscriptionSummary[] }>("/subscriptions");
+}
+
+export async function revealLocalAttachment(revealUrl: string) {
+  const path = revealUrl.startsWith("/api/") ? revealUrl.slice(4) : revealUrl;
+  return request<{ revealed: boolean; filename: string; folder: string }>(path, {
+    method: "POST",
+  });
+}
+
+export async function listSourceCatalog() {
+  return request<{ items: SourceCatalogItem[] }>("/sources");
+}
+
+export async function getSpendBudget() {
+  return request<SpendBudget>("/sources/budget");
+}
+
+export async function setSpendBudget(dailyLimit: string) {
+  return request<SpendBudget>("/sources/budget", {
+    method: "PUT",
+    body: JSON.stringify({ daily_limit: dailyLimit }),
+  });
+}
+
+export async function getAIStatus() {
+  return request<AIStatus>("/ai/status");
+}
+
+export async function connectSourceCredential(sourceId: string, credential: string) {
+  return request<{
+    source_id: string;
+    configured: boolean;
+    masked_credential: string;
+    storage: "process_memory";
+    verified: boolean;
+  }>(`/sources/${encodeURIComponent(sourceId)}/credential`, {
+    method: "PUT",
+    body: JSON.stringify({ credential }),
+  });
+}
+
+export async function disconnectSourceCredential(sourceId: string) {
+  return request<{ source_id: string; configured: boolean }>(
+    `/sources/${encodeURIComponent(sourceId)}/credential`,
+    { method: "DELETE" },
+  );
 }
 
 export function resolveApiUrl(path: string): string {

@@ -10,6 +10,7 @@ class WorkflowState(TypedDict, total=False):
     requested_region: str | None
     status: str
     task_spec: dict[str, Any]
+    query_expansion: dict[str, Any]
     monitor_plan: dict[str, Any]
     search_plan: dict[str, Any]
     selected_sources: list[dict[str, Any]]
@@ -25,4 +26,6 @@ class WorkflowState(TypedDict, total=False):
     quality_passed: bool
     quality_issues: list[str]
     retry_count: int
+    ai_audit: list[dict[str, Any]]
+    ai_report: dict[str, Any]
     report: dict[str, Any]

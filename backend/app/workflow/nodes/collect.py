@@ -17,7 +17,7 @@ async def _collect_source(
     try:
         raw_notices = await asyncio.wait_for(
             adapter.collect(task_spec, search_plan),
-            timeout=60,
+            timeout=90,
         )
         notices = [
             item if isinstance(item, TenderNotice) else TenderNotice.model_validate(item)
@@ -84,8 +84,9 @@ async def collect_documents(state: dict[str, Any]) -> dict[str, Any]:
     succeeded = sum(result["status"] == "success" for result in source_results)
     failed = len(source_results) - succeeded
     return {
+        "status": "failed" if not adapters or succeeded == 0 else state.get("status", "running"),
         "raw_documents": documents,
         "selected_sources": selected_sources,
         "funnel": funnel,
-        "steps": step(state, "多源采集 Agent 集群", f"{succeeded} 个来源成功、{failed} 个来源失败，获得 {len(documents)} 条真实候选。", len(adapters), len(documents), "completed" if succeeded else "warning"),
+        "steps": step(state, "多源采集 Agent 集群", f"{succeeded} 个来源成功、{failed} 个来源失败，获得 {len(documents)} 条真实候选。", len(adapters), len(documents), "completed" if succeeded else "failed"),
     }

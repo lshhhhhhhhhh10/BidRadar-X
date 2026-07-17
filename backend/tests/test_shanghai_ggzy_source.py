@@ -83,6 +83,7 @@ class ShanghaiGGZYSourceTest(unittest.IsolatedAsyncioTestCase):
             ),
             "https://www.shggzy.com/gqcgzbgg/tender-001?cExt=&isIndex=": detail_page(
                 "<p>四、招标文件的获取</p>"
+                "<p><a href='/files/tender-001.pdf'>招标文件下载</a></p>"
                 "<p>六、投标文件递交</p>"
                 "<p>递交截止时间：2026年07月25日10:00</p>"
             ),
@@ -133,6 +134,15 @@ class ShanghaiGGZYSourceTest(unittest.IsolatedAsyncioTestCase):
                     {item.field_path for item in notice.evidence}
                 )
             )
+        tender_notice = next(
+            notice for notice in notices if notice.opportunity_kind == "tender"
+        )
+        self.assertEqual(len(tender_notice.attachments), 1)
+        self.assertEqual(tender_notice.attachments[0].name, "招标文件下载")
+        self.assertEqual(
+            str(tender_notice.attachments[0].url),
+            "https://www.shggzy.com/files/tender-001.pdf",
+        )
 
     async def test_empty_200_response_is_a_source_failure_not_zero_results(self) -> None:
         source = ShanghaiGGZYSource(

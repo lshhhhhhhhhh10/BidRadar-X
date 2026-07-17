@@ -10,6 +10,12 @@ from .v0004_contract_history import CHECKSUM as V0004_CHECKSUM
 from .v0004_contract_history import upgrade as upgrade_v0004
 from .v0005_source_publication_identity import CHECKSUM as V0005_CHECKSUM
 from .v0005_source_publication_identity import upgrade as upgrade_v0005
+from .v0006_hidden_report_runs import CHECKSUM as V0006_CHECKSUM
+from .v0006_hidden_report_runs import upgrade as upgrade_v0006
+from .v0007_daily_spend_guard import CHECKSUM as V0007_CHECKSUM
+from .v0007_daily_spend_guard import upgrade as upgrade_v0007
+from .v0008_history_duplicate_tombstones import CHECKSUM as V0008_CHECKSUM
+from .v0008_history_duplicate_tombstones import upgrade as upgrade_v0008
 
 
 MIGRATION_SPECS = (
@@ -18,4 +24,7 @@ MIGRATION_SPECS = (
     (3, "legacy_workflow_compatibility", V0003_CHECKSUM, upgrade_v0003),
     (4, "contract_history", V0004_CHECKSUM, upgrade_v0004),
     (5, "source_publication_identity", V0005_CHECKSUM, upgrade_v0005),
+    (6, "hidden_report_runs", V0006_CHECKSUM, upgrade_v0006),
+    (7, "daily_spend_guard", V0007_CHECKSUM, upgrade_v0007),
+    (8, "history_duplicate_tombstones", V0008_CHECKSUM, upgrade_v0008),
 )

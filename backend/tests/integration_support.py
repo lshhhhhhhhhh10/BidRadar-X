@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from app.schemas.tender import SourceRecord, TenderNotice
+from app.schemas.tender import Attachment, SourceRecord, TenderNotice
 
 
 def make_notice(
@@ -14,6 +14,7 @@ def make_notice(
     source_url: str,
     marker: str,
     project_fingerprint: str = "3" * 64,
+    attachment_url: str | None = None,
 ) -> TenderNotice:
     fetched_at = datetime.fromisoformat("2026-07-14T14:00:00+08:00")
     return TenderNotice(
@@ -30,6 +31,18 @@ def make_notice(
             authority=1.0,
         ),
         core_content=f"采购服务器及配套服务，来源记录 {marker}。",
+        attachments=(
+            [
+                Attachment(
+                    attachment_id=f"attachment-{marker}",
+                    name="采购需求附件.pdf",
+                    url=attachment_url,
+                    media_type="application/pdf",
+                )
+            ]
+            if attachment_url
+            else []
+        ),
         raw_content_fingerprint=marker[0] * 64,
         notice_stable_fingerprint="2" * 64,
         project_stable_fingerprint=project_fingerprint,
@@ -85,6 +98,7 @@ def isolated_source_set() -> list[Any]:
                     source_name="公开来源 A",
                     source_url="https://public-a.gov.cn/notices/real-001",
                     marker="a",
+                    attachment_url="https://public-a.gov.cn/notices/real-001/attachment.pdf",
                 )
             ],
         ),

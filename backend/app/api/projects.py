@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 
+from ..intelligence.bidder_insights import build_bidder_insights
+from ..intelligence.text_sanitizer import sanitize_notice_text
+from ..schemas.tender import TenderNotice
 from ..storage.repository import Repository
 
 
@@ -48,6 +53,40 @@ def _build_project_profile(run_id: str, project: dict) -> dict:
         for section in primary.get("requirement_sections", [])
     ]
     source = primary.get("source", {})
+    attachments_by_id: dict[str, dict] = {}
+    for notice in notices:
+        for attachment in notice.get("attachments", []):
+            if not isinstance(attachment, dict) or not attachment.get("url"):
+                continue
+            attachment_id = str(attachment.get("attachment_id") or "")
+            if not attachment_id or attachment_id in attachments_by_id:
+                continue
+            local_path = attachment.get("local_path")
+            local_available = bool(
+                attachment.get("archive_status") == "available"
+                and isinstance(local_path, str)
+                and Path(local_path).is_file()
+            )
+            attachments_by_id[attachment_id] = {
+                "attachment_id": attachment_id,
+                "name": attachment.get("name") or "招标文件.pdf",
+                "url": attachment.get("url") or "",
+                "media_type": attachment.get("media_type"),
+                "archive_status": attachment.get("archive_status"),
+                "archive_error": attachment.get("archive_error"),
+                "local_available": local_available,
+                "local_filename": Path(local_path).name if local_available else None,
+                "reveal_url": (
+                    f"/api/runs/{run_id}/projects/{project['project_id']}"
+                    f"/attachments/{attachment_id}/reveal"
+                    if local_available
+                    else None
+                ),
+            }
+    attachments = list(attachments_by_id.values())
+    bidder_insights = build_bidder_insights(
+        [TenderNotice.model_validate(notice) for notice in notices]
+    )
     return {
         "run_id": run_id,
         "project_id": project["project_id"],
@@ -59,11 +98,38 @@ def _build_project_profile(run_id: str, project: dict) -> dict:
         "source_name": source.get("source_name") or "",
         "budget": primary.get("budget"),
         "deadline": primary.get("deadline"),
-        "summary": primary.get("core_content") or "公告未提供正文摘要",
+        "summary": sanitize_notice_text(primary.get("core_content")) or "公告未提供正文摘要",
+        "summary_sanitized": True,
+        "attachments": attachments,
+        "bidder_insights": bidder_insights["items"],
+        "contacts": bidder_insights["contacts"],
         "evidence_count": len(evidence),
+        "module_count": len(modules),
         "details_loaded": True,
         "modules": modules,
     }
+
+
+def load_project_summaries(repository: Repository, run: dict) -> list[dict]:
+    """Return stored summaries and transparently upgrade legacy rows."""
+
+    run_id = run["run_id"]
+    profiles = repository.list_project_profiles(run_id)
+    expected_count = len(run.get("projects", []))
+    needs_upgrade = (
+        len(profiles) != expected_count
+        or any(
+            "attachments" not in profile
+            or "bidder_insights" not in profile
+            or "contacts" not in profile
+            or profile.get("summary_sanitized") is not True
+            for profile in profiles
+        )
+    )
+    if needs_upgrade:
+        repository.save_project_profiles(run_id, build_source_project_summaries(run))
+        profiles = repository.list_project_profiles(run_id)
+    return profiles
 
 
 def _build_requirement_module(section: dict, evidence: dict[str, dict]) -> dict:
@@ -112,9 +178,10 @@ def _evidence_locations(evidence_ids: list[str], evidence: dict[str, dict]) -> s
 @router.get("/runs/{run_id}/projects")
 def list_projects(run_id: str) -> dict[str, list[dict]]:
     repository = Repository()
-    if repository.get_run(run_id) is None:
+    run = repository.get_run(run_id)
+    if run is None:
         raise HTTPException(status_code=404, detail="run not found")
-    return {"items": repository.list_project_profiles(run_id)}
+    return {"items": load_project_summaries(repository, run)}
 
 
 @router.get("/runs/{run_id}/projects/{project_id}")

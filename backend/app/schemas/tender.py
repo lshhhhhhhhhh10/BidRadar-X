@@ -92,6 +92,19 @@ class Attachment(ContractModel):
     media_type: str | None = None
     content_sha256: Sha256Fingerprint | None = None
     fetched_at: AwareDatetime | None = None
+    archive_status: Literal["available", "failed", "unsupported"] | None = None
+    archive_error: Literal[
+        "source_has_no_pdf",
+        "access_denied",
+        "network_error",
+        "unsafe_url",
+        "too_large",
+        "not_pdf_response",
+        "write_failed",
+        "unknown",
+    ] | None = None
+    local_path: str | None = None
+    extracted_text: str | None = Field(default=None, max_length=200_000)
 
 
 class EvidenceReference(ContractModel):

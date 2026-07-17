@@ -36,6 +36,7 @@ class TaskRunResponse(BaseModel):
     changes: list[dict]
     quality_passed: bool
     quality_issues: list[str]
+    ai: dict
     report: dict
 
 

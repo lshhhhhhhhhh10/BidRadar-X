@@ -1,67 +1,51 @@
-# 登录型招标来源安全配置
+# 登录型招标来源配置
 
-更新时间：2026-07-14（Asia/Shanghai）
+更新时间：2026-07-17（Asia/Shanghai）
 
-## 结论
+## 国内来源：天眼查开放平台
 
-TASK-04 不应把剑鱼标讯的普通会员网页接入自动采集。
+BidRadar-X 使用天眼查开放平台的“招投标搜索”接口（接口 ID 1063），不复用
+普通网页 Cookie，也不保存用户的天眼查账号或密码。
 
-剑鱼官网可以确认免费会员能力：帮助中心写明“全国招标信息免费看，不遮挡”，登录支持微信扫码、验证码或密码；公开详情页也提示“登录后即可免费查看完整信息”。但其《用户使用许可协议》第 7 条同时禁止通过未经北京剑鱼授权或认可的第三方软件、系统登录或使用服务，并禁止复制服务过程中进入终端内存的数据和客户端与服务器的交互数据。该约束覆盖用 Playwright 复用普通会员会话批量采集的核心行为。
+申请步骤：
 
-因此本仓库只保留离线、可审计的实验接口：
+1. 打开 <https://open.tianyancha.com/open/1063> 并登录开放平台；
+2. 申请“招投标搜索”接口；
+3. 在“数据中心 → 我的接口”复制 Token；
+4. 通过后端环境变量 `BIDRADAR_TIANYANCHA_TOKEN` 配置 Token；
+5. 重启后端。首页会从“登录申请 Token”切换为“Token 已配置 · 可采集”。
 
-- 从仓库外文件加载 Playwright storage state 的引用；
-- 解析已获授权、人工脱敏保存的列表和详情 HTML；
-- 识别登录墙或过期会话并明确失败；
-- 在线 `collect()` 默认拒绝，不返回模拟公告，也不接入现有工作流。
+官方页面当前标示该接口按次计费，约 ¥0.2/次；实际价格、套餐和权限以用户账号
+中的开放平台信息为准。接口采用 HTTPS，请求头使用 `Authorization: <token>`，支持
+按关键词、标题、采购人、供应商、发布日期、省份及公告类型查询。
 
-如要继续使用剑鱼数据，应先取得北京剑鱼书面许可，或申请其官方开发者 API。官网开发者文档公开了标准/定制数据 API，但要求 `appid`、`key` 和签名；文档没有证明该 API 属于免费会员权益，不能将网页会员登录态替代 API 授权。
+Token 只在服务端读取，不返回前端、不拼进 URL、不写入业务数据库或日志。没有
+Token 时采集器不会进入生产来源路由；Token 失效、接口未申请或账号无权限时会明确
+失败，不返回模拟数据。
 
-## 合法替代方向
+## 海外来源：SAM.gov
 
-本实验选择 StoneDT 发布的“全国招投标数据免费接口”作为后续登录型来源候选，而不是绕过剑鱼限制。其公开文档明确提供带 `Authorization` 的列表、详情 API，普通开发者免费账号每天最多 5000 条、单页最多 20 条，并列出可对接 CRM/BI 的程序化使用场景。这比模拟浏览器读取会员页面具有更清晰的自动化授权边界。
+SAM.gov Contract Opportunities API v2 使用注册用户在 Account Details 中生成的
+个人 API Key。环境变量名：`BIDRADAR_SAM_GOV_API_KEY`。
 
-该候选没有在 TASK-04 中接入：当前允许的实现文件名和测试范围均限定为剑鱼实验，而且用户要求不要接入总工作流。后续应单独验证 StoneDT 当前注册可用性、HTTPS 接口、服务条款、数据溯源质量和真实账号配额；未完成这些验证前，不能把它标记为生产可用。
+配置后重启后端，首页会从“需登录获取 API Key”切换为“已授权 · 可采集”。密钥
+只通过后端环境变量读取，不返回前端、不写入数据库或日志。
 
-## storage state 配置
+## 已放弃来源：剑鱼标讯
 
-环境变量名：`BIDRADAR_JIANYU_STORAGE_STATE_FILE`
+剑鱼标讯已从首页信息源和生产来源路由中移除。普通会员网页登录态不能由本站
+安全复用，其公开使用协议也不支持未经授权的第三方网页自动化。本项目不再把剑鱼
+作为待接入来源；历史工作日志只作为审计记录保留。
 
-变量值必须是仓库外的绝对路径，不能是 JSON、Cookie 或 Token 本身。示例（路径仅作说明）：
+## 密钥安全要求
 
-```powershell
-$env:BIDRADAR_JIANYU_STORAGE_STATE_FILE = 'C:\Users\<用户名>\.bidradar\jianyu-storage-state.json'
-```
+- 不要把 Token、API Key、Cookie 或密码提交到 Git；
+- 不要把密钥粘贴到聊天、工单、测试 fixture 或截图中；
+- 正式部署应使用平台 Secret Manager，并为不同环境配置不同密钥；
+- 账号停用、Token 轮换或权限变更后，应立即替换服务端密钥并重启服务；
+- 遇到无权限、余额不足、频率过快等错误时停止调用，不绕过平台限制。
 
-状态文件应由用户在获得平台书面许可后，使用本机 Playwright 正常打开登录页并人工完成登录，再保存到仓库外目录。不得自动填写账号密码，不得自动处理短信/图片/滑块验证码，也不得导出或复制用户现有浏览器配置。调用方可这样取得经过校验的文件引用：
+## 官方依据
 
-```python
-from app.sources.jianyu import JianyuLoginSession
-
-session = JianyuLoginSession.from_environment()
-# 仅在已获书面授权的独立采集任务中：
-# context = await browser.new_context(storage_state=str(session.storage_state_path))
-```
-
-加载器会拒绝：缺少环境变量、内联 JSON、相对路径、仓库内文件、符号链接、超大文件、非 Playwright JSON、意外域名，以及不含任何登录材料的空状态。返回对象只保留文件路径，不把 Cookie/Token 写入日志或业务记录。
-
-## 运行与失效处理
-
-- 未配置凭证时，`JianyuSource.from_environment()` 和 `collect()` 明确抛出 `JianyuSessionError`。
-- 页面仍出现“登录后即可免费查看完整信息”或“会话已失效”时，解析器抛出 `JianyuAuthenticationError`，不得返回部分正文或模拟成功。
-- 即使存在 storage state，当前 `collect()` 仍抛出 `JianyuAutomationNotAuthorizedError`；只有取得书面许可并另行评审后才能新增联网实现。
-- storage state 到期或账号退出后，应在仓库外删除并重新人工生成；不要提交、复制到 fixture、粘贴到工单或聊天中。
-
-若未来获准联网，默认限制为单并发、两次请求至少间隔 2 秒；遇到 429/403、验证码或安全校验立即停止，遵循 `Retry-After`，不得更换 IP、伪造设备指纹或绕过限制。
-
-## fixture 规则
-
-`backend/tests/fixtures/jianyu/` 内只有人工重建的最小 HTML：单位、编号、金额、链接和附件均为测试值；不包含真实账号、个人联系人、手机号、Cookie、Token、storage state 或完整网页快照。测试只验证本地解析和失败路径，不访问外网。
-
-## 调查证据
-
-- 剑鱼标讯用户使用许可协议：<https://www.jianyu360.cn/front/staticPage/permission_rules.html>
-- 剑鱼标讯帮助中心（免费查询、登录方式、开发者 API）：<https://www.jianyu360.cn/helpCenter/index>
-- 剑鱼开发者 API 帮助页：<https://www.jianyu360.cn/helpCenter/detail/QltCXFFNUQhXBhVaFV9TRFYBAQYRCkMK.html>
-- StoneDT 免费招投标接口说明：<https://gitee.com/completely-open-source/free-bidding-data-interface/blob/master/README.md>
-
+- 天眼查招投标搜索 API：<https://open.tianyancha.com/open/1063>
+- SAM.gov Opportunities API：<https://open.gsa.gov/api/get-opportunities-public-api/>

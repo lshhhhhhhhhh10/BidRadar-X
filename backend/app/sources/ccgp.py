@@ -69,6 +69,10 @@ class CCGPAccessBlockedError(CCGPError):
     """Raised when CCGP asks the caller to stop or complete a security check."""
 
 
+class CCGPTemporaryUnavailableError(CCGPError):
+    """Raised when CCGP's public search service stays busy after retries."""
+
+
 @dataclass(frozen=True)
 class HTTPResponse:
     url: str
@@ -375,55 +379,73 @@ class CCGPSource:
             else TaskSpec.model_validate(dict(task_spec))
         )
         max_pages = min(max(int(search_plan.get("max_pages", 1)), 1), 20)
+        max_notices = min(
+            max(int(search_plan.get("max_results_per_source", 20)), 1),
+            50,
+        )
         notices: list[TenderNotice] = []
         seen_urls: set[str] = set()
+        planned_terms = [
+            str(value).strip()
+            for value in search_plan.get("search_terms", [])
+            if str(value).strip()
+        ][:6]
+        search_terms: list[str | None] = planned_terms or [None]
 
         query_regions = task.regions or [""]
         for query_region in query_regions:
             region_scope = [query_region] if query_region else []
-            for page_index in range(1, max_pages + 1):
-                response = await self._request(
-                    self.SEARCH_URL,
-                    params=self._search_params(task, page_index, query_region),
-                )
-                _raise_if_access_blocked(response)
-                parser = _SearchResultParser(response.url)
-                parser.feed(response.text)
-                if not parser.found_results_container:
-                    raise CCGPParseError(
-                        "CCGP search page did not contain the expected results list"
+            for search_term in search_terms:
+                for page_index in range(1, max_pages + 1):
+                    response = await self._request(
+                        self.SEARCH_URL,
+                        params=self._search_params(
+                            task,
+                            page_index,
+                            query_region,
+                            search_term=search_term,
+                        ),
                     )
-                if not parser.items:
-                    break
-                for item in parser.items:
-                    if (
-                        item.url in seen_urls
-                        or not _within_time_range(item.published_at, task)
-                        or not _region_matches(item.region, region_scope)
-                    ):
-                        continue
-                    seen_urls.add(item.url)
-                    detail_response = await self._request(
-                        item.url,
-                        params=None,
-                    )
-                    _raise_if_access_blocked(detail_response)
-                    try:
-                        notice = self._parse_notice(detail_response, task)
-                    except CCGPParseError as error:
-                        logger.warning(
-                            "Skipping unparseable CCGP detail %s: %s",
-                            item.url,
-                            error,
+                    _raise_if_access_blocked(response)
+                    parser = _SearchResultParser(response.url)
+                    parser.feed(response.text)
+                    if not parser.found_results_container:
+                        raise CCGPParseError(
+                            "CCGP search page did not contain the expected results list"
                         )
-                        continue
-                    if not _within_time_range(notice.published_at, task):
-                        continue
-                    if not _region_matches(notice.region, region_scope):
-                        continue
-                    if _matches_exclusion(notice, task.exclusions):
-                        continue
-                    notices.append(notice)
+                    if not parser.items:
+                        break
+                    for item in parser.items:
+                        if (
+                            item.url in seen_urls
+                            or not _within_time_range(item.published_at, task)
+                            or not _region_matches(item.region, region_scope)
+                        ):
+                            continue
+                        seen_urls.add(item.url)
+                        detail_response = await self._request(
+                            item.url,
+                            params=None,
+                        )
+                        _raise_if_access_blocked(detail_response)
+                        try:
+                            notice = self._parse_notice(detail_response, task)
+                        except CCGPParseError as error:
+                            logger.warning(
+                                "Skipping unparseable CCGP detail %s: %s",
+                                item.url,
+                                error,
+                            )
+                            continue
+                        if not _within_time_range(notice.published_at, task):
+                            continue
+                        if not _region_matches(notice.region, region_scope):
+                            continue
+                        if _matches_exclusion(notice, task.exclusions):
+                            continue
+                        notices.append(notice)
+                        if len(notices) >= max_notices:
+                            return notices
         return notices
 
     async def _request(
@@ -455,6 +477,10 @@ class CCGPSource:
                     )
                 elif response.status_code >= 400:
                     raise CCGPError(f"CCGP returned HTTP {response.status_code}")
+                elif _is_server_busy_response(response):
+                    last_error = CCGPTemporaryUnavailableError(
+                        "CCGP public search service returned its server-busy page"
+                    )
                 else:
                     if not _is_ccgp_url(response.url):
                         raise CCGPError("CCGP redirected to a non-CCGP URL")
@@ -473,6 +499,10 @@ class CCGPSource:
                 last_error = error
             if attempt < self.max_retries:
                 await self._sleep(self.retry_backoff * (2**attempt))
+        if isinstance(last_error, CCGPTemporaryUnavailableError):
+            raise CCGPTemporaryUnavailableError(
+                f"CCGP search service stayed busy after {self.max_retries + 1} attempts"
+            ) from last_error
         raise CCGPError(
             f"CCGP request failed after {self.max_retries + 1} attempts"
         ) from last_error
@@ -488,9 +518,15 @@ class CCGPSource:
             self._last_request_started = current
 
     def _search_params(
-        self, task: TaskSpec, page_index: int, query_region: str
+        self,
+        task: TaskSpec,
+        page_index: int,
+        query_region: str,
+        *,
+        search_term: str | None = None,
     ) -> dict[str, Any]:
         terms = _unique_nonempty([task.topic, *task.keywords])
+        start_time, end_time = self._effective_search_range(task)
         return {
             "searchtype": 1,
             "page_index": page_index,
@@ -500,15 +536,32 @@ class CCGPSource:
             "pinMu": 0,
             "bidType": 0,
             "dbselect": "bidx",
-            "kw": " ".join(terms),
-            "start_time": _search_date(task.time_range_start),
-            "end_time": _search_date(task.time_range_end),
+            "kw": search_term or " ".join(terms),
+            "start_time": _search_date(start_time),
+            "end_time": _search_date(end_time),
             "timeType": 6 if task.time_range_start or task.time_range_end else 0,
             "displayZone": query_region,
             "zoneId": "",
             "pppStatus": 0,
             "agentName": "",
         }
+
+    def _effective_search_range(
+        self,
+        task: TaskSpec,
+    ) -> tuple[datetime | None, datetime | None]:
+        """Keep future monitoring windows valid for CCGP's historical search form."""
+
+        today = self._now().astimezone(SHANGHAI_TZ)
+        start = task.time_range_start
+        end = task.time_range_end
+        if end is not None and end > today:
+            end = today
+        if start is not None and start > today:
+            start = today.replace(hour=0, minute=0, second=0, microsecond=0)
+        if start is not None and end is not None and start > end:
+            start = end.replace(hour=0, minute=0, second=0, microsecond=0)
+        return start, end
 
     def _parse_notice(self, response: HTTPResponse, task: TaskSpec) -> TenderNotice:
         parser = _DetailParser(response.url)
@@ -851,6 +904,12 @@ def _source_notice_id(url: str) -> str | None:
 def _matches_exclusion(notice: TenderNotice, exclusions: list[str]) -> bool:
     haystack = f"{notice.title}\n{notice.core_content}".casefold()
     return any(term.casefold() in haystack for term in exclusions if term.strip())
+
+
+def _is_server_busy_response(response: HTTPResponse) -> bool:
+    path = urlparse(response.url).path.casefold()
+    sample = response.text[:3000]
+    return "serverisbusy" in path or "您正在访问中国政府采购网搜索平台" in sample
 
 
 def _raise_if_access_blocked(response: HTTPResponse) -> None:

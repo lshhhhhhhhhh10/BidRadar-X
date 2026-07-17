@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { AppShell } from "../components/AppShell";
+
 import {
   getRunForTask,
   getRunReport,
@@ -54,10 +56,7 @@ export default function ProjectsPage() {
         return;
       }
       if (!runId || !taskId) {
-        if (!cancelled) {
-          setError("结果地址缺少 run_id 或 task_id，请从首页重新运行任务。");
-          setLoading(false);
-        }
+        window.location.replace("/reports");
         return;
       }
       try {
@@ -82,7 +81,8 @@ export default function ProjectsPage() {
   }, [isDemo, runId, taskId]);
 
   return (
-    <div className="collection-page">
+    <AppShell active="reports">
+      <div className="collection-page">
       <header className="collection-header">
         <Link className="outline-action" href="/">返回首页</Link>
         <div>
@@ -141,9 +141,10 @@ export default function ProjectsPage() {
           <span className="outline-action report-unavailable" aria-disabled="true">Word 暂不可下载</span>
         )}
         <span>{isDemo ? "已汇总 10 条项目及八大模块，下载时按当前时间命名。" : reportStatusText(report)}</span>
-        <Link className="outline-action" href="/reports">查看报告历史</Link>
+        <Link className="outline-action" href="/reports">返回项目报告</Link>
       </footer>
-    </div>
+      </div>
+    </AppShell>
   );
 }
 

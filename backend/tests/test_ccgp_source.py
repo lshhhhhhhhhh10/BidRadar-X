@@ -83,6 +83,30 @@ def fixture(name: str) -> str:
 
 
 class CCGPSourceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_expanded_search_terms_are_sent_as_separate_site_queries(self) -> None:
+        transport = StubTransport(
+            {CCGPSource.SEARCH_URL: fixture("search_results_empty.html")}
+        )
+        source = CCGPSource(transport=transport, min_interval=0)
+        task = TaskSpec(
+            task_id="task-ccgp-expansion",
+            query="查询服务器采购公告",
+            topic="服务器",
+            regions=[],
+            keywords=["服务器", "计算节点"],
+        )
+
+        notices = await source.collect(
+            task,
+            {"max_pages": 1, "search_terms": ["服务器", "计算节点"]},
+        )
+
+        self.assertEqual(notices, [])
+        self.assertEqual(
+            [call["params"]["kw"] for call in transport.calls],
+            ["服务器", "计算节点"],
+        )
+
     async def test_collect_searches_by_task_and_returns_contract_notices(
         self,
     ) -> None:
@@ -364,6 +388,58 @@ class CCGPSourceTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(CCGPParseError):
             await source.collect(task, {"max_pages": 1})
+
+    async def test_future_monitoring_range_is_clamped_for_official_search(self) -> None:
+        transport = StubTransport(
+            {CCGPSource.SEARCH_URL: fixture("search_results_empty.html")}
+        )
+        source = CCGPSource(
+            transport=transport,
+            min_interval=0,
+            now=lambda: datetime(
+                2026, 7, 17, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")
+            ),
+        )
+        task = TaskSpec(
+            task_id="task-ccgp-future",
+            query="未来一年北京充电站招标",
+            topic="充电站",
+            regions=["北京"],
+            keywords=["充电桩"],
+            time_range_start="2026-07-17T00:00:00+08:00",
+            time_range_end="2027-07-17T23:59:59+08:00",
+        )
+
+        await source.collect(task, {"max_pages": 1})
+
+        self.assertEqual(transport.calls[0]["params"]["start_time"], "2026:07:17")
+        self.assertEqual(transport.calls[0]["params"]["end_time"], "2026:07:17")
+
+    async def test_server_busy_page_is_retried_as_a_transient_failure(self) -> None:
+        transport = FlakyTransport(
+            [
+                "<html><body>您正在访问中国政府采购网搜索平台</body></html>",
+                fixture("search_results_empty.html"),
+            ]
+        )
+        source = CCGPSource(
+            transport=transport,
+            max_retries=1,
+            min_interval=0,
+            retry_backoff=0,
+        )
+        task = TaskSpec(
+            task_id="task-ccgp-busy",
+            query="服务器采购公告",
+            topic="服务器",
+            regions=[],
+            keywords=["服务器"],
+        )
+
+        notices = await source.collect(task, {"max_pages": 1})
+
+        self.assertEqual(notices, [])
+        self.assertEqual(len(transport.calls), 2)
 
 
 if __name__ == "__main__":

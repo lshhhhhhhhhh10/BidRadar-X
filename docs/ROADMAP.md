@@ -41,7 +41,7 @@
 | E01 | [TASK-01 日志](worklogs/TASK-01-data-contract.md)、[DATA_CONTRACT](DATA_CONTRACT.md)、`backend/app/schemas/` |
 | E02 | [TASK-02 日志](worklogs/TASK-02-ccgp.md)、`backend/app/sources/ccgp.py`、CCGP fixture 测试 |
 | E03 | [TASK-03 日志](worklogs/TASK-03-ggzy.md)、`backend/app/sources/ggzy.py`、GGZY fixture 测试 |
-| E04 | [TASK-04 日志](worklogs/TASK-04-login-source.md)、[LOGIN_SOURCE_SETUP](LOGIN_SOURCE_SETUP.md)、`backend/app/sources/jianyu.py` |
+| E04 | [TASK-04 历史日志](worklogs/TASK-04-login-source.md)、[LOGIN_SOURCE_SETUP](LOGIN_SOURCE_SETUP.md)、`backend/app/sources/tianyancha.py` |
 | E05 | [TASK-05 日志](worklogs/TASK-05-docx.md)、[REPORT_FORMAT](REPORT_FORMAT.md)、`backend/app/services/docx_publisher.py` |
 | E06 | [TASK-06 日志](worklogs/TASK-06-integration.md)、`backend/app/workflow/`、集成测试 |
 | E07 | [TASK-07 日志](worklogs/TASK-07-incremental.md)、`backend/app/services/incremental.py`、增量测试 |
@@ -60,7 +60,7 @@
 | TASK-01 | 以前各来源和报告字段各说各话；完成后后端可用统一公告、证据、需求和报告模型交换数据 | 数据/后端 | 已完成－自动测试验证（契约基础） | F02、N01、W01，并为 I01/I02 提供公共契约 | N01 的全量真实字段和 I02 的完整变化规则尚未完成 |
 | TASK-02 | 以前无法读取 CCGP；完成后适配器能搜索、解析并输出统一公告，且有过真实抓取 | 真实来源/后端 | 部分完成 | R01 | 真实抓取不等于全局限速、缓存重试、完整证据和运行持久化等 R01 门禁已满足 |
 | TASK-03 | 以前只有一个公开来源；完成后 GGZY 适配器可用 fixture 解析第二来源 | 真实来源/后端 | 部分完成 | R04 | fixture 全绿不等于真实网络可用，R04 还需正式来源契约和黑盒 |
-| TASK-04 | 以前没有登录来源边界；完成后可离线解析剑鱼页面并明确授权/会话安全边界 | 来源/安全实验 | 外部条件阻塞 | R05 | 在线采集仍缺书面授权、接口和可用凭据，不能标成成功 |
+| TASK-04 | 旧剑鱼实验已退役；当前以天眼查开放平台 Token 适配器承接国内授权来源 | 来源/API 适配 | 凭据阻塞 | R05 | 获得用户 Token 后完成真实黑盒验收 |
 | TASK-05 | 以前只有结构化数据；完成后后端可生成并校验符合结构的 DOCX | 报告/后端 | 已完成－自动测试验证 | W01、W02 | 该任务没有提供网页下载；下载入口由 TASK-10 完成 |
 | TASK-06 | 以前来源、清洗、归并、证据和报告各自独立；完成后形成来源到 DOCX 的纵向集成样板 | 后端/数据/报告/Q | 部分完成 | R01/R04/R05、N01/N02、D01、I01、W02、Q01 | 测试大量使用 fake/fixture；一次真实 CCGP 链路不代表每个横向能力门禁完成 |
 | TASK-07 | 以前重复运行无法判断新项目和变化；完成后可保存快照、水位线并做增量交付 | 数据/基础设施 | I01：已完成－自动测试验证；I02：部分完成 | I01、I02 | 新项目核心已验证，但资格/技术变化、完整并发恢复仍欠缺 |
@@ -214,7 +214,7 @@ flowchart LR
 
 ## 明确未完成项
 
-- CCGP 尚未满足 F01 全部生产门禁；GGZY 尚无成功真实网络证据；剑鱼受授权阻塞。
+- CCGP 尚未满足 F01 全部生产门禁；GGZY 尚无成功真实网络证据；天眼查与 SAM.gov 待用户凭据进行真实验收。
 - 真实附件、PDF、扫描件 OCR、完整字段级证据和跨站生命周期尚未完成。
 - F02 新运行/溯源存储接口尚未完整接入生产工作流。
 - 资格覆盖/等价、企业能力匹配、历史中标价格、预计利润和商业背景尚未完成。
@@ -234,4 +234,4 @@ flowchart LR
 6. `未开始`：没有支持核心目标的生产实现。
 7. `状态无法验证`：现有证据不足且当前环境无法复核。
 
-特别约束：真实抓到一条 CCGP 不等于 R01 全完成；GGZY fixture 不等于真实网络可用；剑鱼离线解析不等于在线授权；DOCX 后端生成不等于网页下载；当前字符串相似检索不等于企业知识库 RAG；一次产品链跑通不等于 Q01/Q02 完成。
+特别约束：真实抓到一条 CCGP 不等于 R01 全完成；GGZY fixture 不等于真实网络可用；天眼查适配器单元测试不等于已获得用户 Token；DOCX 后端生成不等于网页下载；当前字符串相似检索不等于企业知识库 RAG；一次产品链跑通不等于 Q01/Q02 完成。

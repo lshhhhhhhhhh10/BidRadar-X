@@ -117,12 +117,12 @@ export const SHANGHAI_PROPERTY_DEMO_PROJECTS: ProjectSummary[] = [
     summary: "上海官方政府采购频道公开招标公告，原公告编号及链接已核验。",
   }),
   demoProject({
-    id: "jianyu-wanan-cleaning",
+    id: "wanan-cleaning",
     title: "2026-2027年万安1-3期营销区域客服及保洁服务项目公开招标公告",
     publishedAt: "2026-07-02",
     deadline: "2026-07-22T14:00:00+08:00",
-    url: "https://shanghai.jianyu360.cn/jybx/20260702_26070166411730.html",
-    sourceName: "剑鱼标讯",
+    url: "https://demo.bidradar.invalid/notices/wanan-cleaning",
+    sourceName: "合成演示来源",
     purchaser: "森兰联行（上海）企业发展有限公司",
     summary: "营销区域日常保洁、客服礼宾服务，招标编号采招2026-1626。",
   }),
@@ -150,6 +150,7 @@ function demoProject(input: {
     source_name: "BidRadar-X 合成演示数据",
     deadline,
     summary: "合成演示内容，仅用于验证界面、增量识别和报告排版，不代表真实公告事实。",
+    attachments: [],
     evidence_count: 3,
     module_count: 0,
   };

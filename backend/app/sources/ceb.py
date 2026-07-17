@@ -310,6 +310,12 @@ class CEBSource:
             raise ValueError("now() must return a timezone-aware datetime")
         now = now.astimezone(SHANGHAI_TZ)
         terms = _query_terms(task, plan)
+        planned_terms = [
+            str(value).strip()
+            for value in plan.get("search_terms", [])
+            if str(value).strip()
+        ][:6]
+        search_terms = list(dict.fromkeys(planned_terms)) or [task.topic]
         max_pages = max(1, min(int(plan.get("max_pages", 1)), 10))
         notices: list[TenderNotice] = []
         seen: set[str] = set()
@@ -318,89 +324,89 @@ class CEBSource:
         )
 
         for notice_type, url in self.CATEGORY_URLS.items():
-            for page in range(1, max_pages + 1):
-                params = {
-                    # Let the official platform do the first-stage recall instead
-                    # of scanning only the newest unfiltered pages.  Publication
-                    # dates are filtered locally when the user actually supplies
-                    # a time range; an empty value means "no publication limit".
-                    "dates": "",
-                    "word": task.topic,
-                    "categoryId": self.CATEGORY_IDS[notice_type],
-                    "industryName": "",
-                    "area": "",
-                    "status": "01",
-                    "publishMedia": "",
-                    "sourceInfo": "",
-                    "showStatus": "1",
-                    "signDate": f"{now:%Y-%m-%d %H:%M:%S},lt",
-                    "page": str(page),
-                }
-                response = await self._transport.get(
-                    url,
-                    params=params,
-                    headers={"User-Agent": self.USER_AGENT, "Accept": "text/html"},
-                    timeout=self._timeout,
-                )
-                if response.status_code < 200 or response.status_code >= 300:
-                    raise CEBSourceError(
-                        f"national platform returned HTTP {response.status_code}"
+            for search_term in search_terms:
+                for page in range(1, max_pages + 1):
+                    params = {
+                        # Let the official platform do the first-stage recall instead
+                        # of scanning only the newest unfiltered pages. Publication
+                        # dates are filtered locally when the user supplies a range.
+                        "dates": "",
+                        "word": search_term,
+                        "categoryId": self.CATEGORY_IDS[notice_type],
+                        "industryName": "",
+                        "area": "",
+                        "status": "01",
+                        "publishMedia": "",
+                        "sourceInfo": "",
+                        "showStatus": "1",
+                        "signDate": f"{now:%Y-%m-%d %H:%M:%S},lt",
+                        "page": str(page),
+                    }
+                    response = await self._transport.get(
+                        url,
+                        params=params,
+                        headers={"User-Agent": self.USER_AGENT, "Accept": "text/html"},
+                        timeout=self._timeout,
                     )
-                parser = _ListingParser()
-                parser.feed(response.text)
-                if not parser.found_table:
-                    raise CEBStructureChangedError(
-                        "national platform list table was not found"
-                    )
-                if not parser.items:
-                    break
-                for item in parser.items:
-                    if item.notice_uuid in affected_notice_ids:
-                        continue
-                    if _has_conflict(item.title):
-                        continue
-                    if not _title_matches_native_category(notice_type, item.title):
-                        continue
-                    if item.open_time <= now:
-                        continue
-                    if (
-                        task.time_range_start is not None
-                        and item.published_at < task.time_range_start
-                    ) or (
-                        task.time_range_end is not None
-                        and item.published_at > task.time_range_end
-                    ):
-                        continue
-                    if task.regions and not any(
-                        requested.casefold() in (item.region or "").casefold()
-                        or (item.region or "").casefold() in requested.casefold()
-                        for requested in task.regions
-                    ):
-                        continue
-                    matched_terms = _matched_terms(item.title, terms)
-                    if terms and not matched_terms:
-                        continue
-                    if any(
-                        exclusion.casefold() in item.title.casefold()
-                        for exclusion in task.exclusions
-                        if exclusion.strip()
-                    ):
-                        continue
-                    identity = _sha256(
-                        f"{notice_type}|{item.title}|{item.published_at.date()}"
-                    )
-                    if identity in seen:
-                        continue
-                    seen.add(identity)
-                    notices.append(
-                        self._to_notice(
-                            item,
-                            notice_type=notice_type,
-                            list_url=response.url,
-                            matched_terms=matched_terms,
-                            fetched_at=now,
+                    if response.status_code < 200 or response.status_code >= 300:
+                        raise CEBSourceError(
+                            f"national platform returned HTTP {response.status_code}"
                         )
-                    )
+                    parser = _ListingParser()
+                    parser.feed(response.text)
+                    if not parser.found_table:
+                        raise CEBStructureChangedError(
+                            "national platform list table was not found"
+                        )
+                    if not parser.items:
+                        break
+                    for item in parser.items:
+                        if item.notice_uuid in affected_notice_ids:
+                            continue
+                        if _has_conflict(item.title):
+                            continue
+                        if not _title_matches_native_category(notice_type, item.title):
+                            continue
+                        if item.open_time <= now:
+                            continue
+                        if (
+                            task.time_range_start is not None
+                            and item.published_at < task.time_range_start
+                        ) or (
+                            task.time_range_end is not None
+                            and item.published_at > task.time_range_end
+                        ):
+                            continue
+                        if task.regions and not any(
+                            requested.casefold() in (item.region or "").casefold()
+                            or (item.region or "").casefold() in requested.casefold()
+                            for requested in task.regions
+                        ):
+                            continue
+                        matched_terms = _matched_terms(item.title, terms)
+                        if terms and not matched_terms:
+                            continue
+                        if any(
+                            exclusion.casefold() in item.title.casefold()
+                            for exclusion in task.exclusions
+                            if exclusion.strip()
+                        ):
+                            continue
+                        identity = _sha256(
+                            f"{notice_type}|{item.title}|{item.published_at.date()}"
+                        )
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        notices.append(
+                            self._to_notice(
+                                item,
+                                notice_type=notice_type,
+                                list_url=response.url,
+                                matched_terms=matched_terms,
+                                fetched_at=now,
+                            )
+                        )
         return notices
 
     async def _affected_notice_ids(

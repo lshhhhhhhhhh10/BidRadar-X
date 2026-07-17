@@ -11,7 +11,16 @@ def analyze_with_rag(state: dict[str, Any]) -> dict[str, Any]:
     for project in state["projects"]:
         projected_documents = [
             {
-                "content": document["notice"]["core_content"],
+                "content": "\n\n".join(
+                    [
+                        document["notice"]["core_content"],
+                        *[
+                            attachment.get("extracted_text") or ""
+                            for attachment in document["notice"].get("attachments", [])
+                            if attachment.get("extracted_text")
+                        ],
+                    ]
+                )[:240_000],
                 "budget": document["notice"]["budget"],
                 "deadline": document["notice"]["deadline"],
                 "purchaser": document["notice"]["purchaser"],

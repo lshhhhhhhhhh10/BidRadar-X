@@ -24,7 +24,7 @@ def update_memory(state: dict[str, Any]) -> dict[str, Any]:
                 task_id=state["task_id"],
                 run_id=state["run_id"],
                 delivery_fingerprint=report["delivery_fingerprint"],
-                artifact_uri=report["filename"],
+                artifact_uri=report.get("artifact_uri") or report["filename"],
                 snapshots=snapshots,
                 watermarks=watermarks,
             )

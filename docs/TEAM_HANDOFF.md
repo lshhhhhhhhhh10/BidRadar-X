@@ -34,7 +34,7 @@ BidRadar-X 同时面向投标方和招标方。
 
 - `R01 CCGP`：有生产适配器、fixture 测试和历史真实抓取，但 F01 的全局限速、缓存重试、完整字段/证据、运行持久化等门禁未全满足。
 - `R04 GGZY`：有生产适配器和 fixture 测试；历史真实网络验证失败，不能写成在线可用。
-- `R05 剑鱼`：只有离线解析和会话安全实验；缺合法授权/API/可用凭据，属于外部条件阻塞。
+- `R05 登录来源`：天眼查招投标 API 和 SAM.gov 适配器已实现；缺用户 Token/API Key 时不会进入生产路由。
 - 通用附件源仍返回模拟正文；真实附件、PDF 和 OCR 没有实现。
 - 规范化、词法证据、相似归并、变化检测已有样板，但真实附件证据、跨站标注和完整变化规则不足。
 - 当前 `EvidenceRAG` 只做公告文本的本地词法/字符串相似检索。它没有企业资料、飞书接入、文档索引、向量/混合检索和企业知识库权限，因此不是 `L04` 企业知识库 RAG。
@@ -49,7 +49,7 @@ BidRadar-X 同时面向投标方和招标方。
 - **前端页面**接收用户输入，并展示项目、详情和报告。当前代码在 `app/`，通过 `lib/tender-api.ts` 调用后端。
 - **FastAPI** 向前端提供任务、项目、报告和订阅 API。入口是 `backend/app/main.py`，路由在 `backend/app/api/`。
 - **工作流**把一次查询拆成需求理解、来源选择、采集、清洗、去重、证据、变化判断和报告生成。图和节点在 `backend/app/workflow/`。
-- **来源适配器**知道如何访问不同招投标网站。CCGP、GGZY 和剑鱼在 `backend/app/sources/`；注册到生产工作流不等于来源已经通过生产验收。
+- **来源适配器**知道如何访问不同招投标网站。CCGP、GGZY、天眼查和 SAM.gov 在 `backend/app/sources/`；注册到生产工作流不等于来源已经通过生产验收。
 - **SQLite 和迁移**保存任务、公告、证据、快照、水位线、调度和交付历史。代码在 `backend/app/storage/`。F02 新增的版本化溯源模型仍需在后续来源链完整接线。
 - **调度器**负责每天、每周或指定时间自动执行，代码在 `backend/app/services/scheduler*.py`；自然语言调度在 `schedule_intent.py`。
 - **DOCX 发布器**生成并验证 Word 文件，代码在 `backend/app/services/docx_publisher.py`。网页下载由报告 API 和前端报告路由提供。
@@ -79,7 +79,7 @@ flowchart LR
 | `backend/app/api/` | tasks/projects/reports/subscriptions API | 有生产路由和测试 |
 | `backend/app/schemas/` | 公共输入输出模型 | 基础契约可用，决策字段待扩展 |
 | `backend/app/workflow/` | 查询编排和节点 | 纵向样板可运行，部分来源/解析仍是 fixture 或规则 |
-| `backend/app/sources/` | 站点采集和附件入口 | CCGP 部分、GGZY 部分、剑鱼阻塞、附件模拟 |
+| `backend/app/sources/` | 站点采集和附件入口 | CCGP 部分、GGZY 部分、天眼查/SAM.gov 待用户凭据、附件模拟 |
 | `backend/app/storage/` | SQLite、迁移、仓储 | F02 自动测试通过，旧库兼容和生产接线有警告 |
 | `backend/app/services/` | 任务、调度、DOCX | I03/I04/W02 核心已验证 |
 | `backend/tests/`、`tests/` | 后端/前端自动测试 | 隔离短路径后端 125 个；前端 3 个 |
@@ -197,7 +197,7 @@ C01 基线结果：短隔离路径后端 `125/125` 通过，compileall 通过；
 
 当前唯一关键路径入口是 [WORK_PLAN 的 R01](WORK_PLAN.md#3-当前唯一关键路径)：CCGP 公开来源生产加固。它要把已有样板落实到 F01/F02 门禁。C01 不生成 R01 实现提示词，也不开始 R01。
 
-其他阻塞：GGZY 真实网络未验证；剑鱼缺授权；真实附件/PDF/OCR 缺失；默认旧库、长路径、TypeScript 类型和 Windows 构建警告待独立任务处理。
+其他阻塞：GGZY 真实网络未验证；天眼查与 SAM.gov 缺用户凭据；真实附件/PDF/OCR 缺失；默认旧库、长路径、TypeScript 类型和 Windows 构建警告待独立任务处理。
 
 ## 9. 两名学生如何与 Codex 协作
 

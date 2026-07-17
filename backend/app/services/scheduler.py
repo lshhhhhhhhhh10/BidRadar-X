@@ -129,6 +129,7 @@ class SubscriptionService:
     def create(
         self,
         *,
+        task_id: str | None = None,
         query: str,
         frequency: str,
         timezone_name: str,
@@ -138,6 +139,10 @@ class SubscriptionService:
         max_retries: int,
         retry_backoff_seconds: int,
     ) -> dict[str, Any]:
+        resolved_task_id = task_id or str(uuid4())
+        existing = self.repository.get_subscription(resolved_task_id)
+        if existing is not None:
+            return existing
         now = self.clock.now()
         next_run_at = cast(datetime, self.scheduler.next_run_at(
             frequency=frequency,
@@ -148,7 +153,7 @@ class SubscriptionService:
             after=now,
         ))
         return self.repository.create_subscription(
-            task_id=str(uuid4()),
+            task_id=resolved_task_id,
             query=query,
             frequency=frequency,
             timezone_name=timezone_name,

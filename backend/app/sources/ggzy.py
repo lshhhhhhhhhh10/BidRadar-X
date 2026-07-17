@@ -31,7 +31,8 @@ from app.schemas.tender import (
 
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-SEARCH_URL = "https://deal.ggzy.gov.cn/ds/deal/dealList_find.jsp"
+SEARCH_URL = "https://www.ggzy.gov.cn/information/pubTradingInfo/getTradList"
+SEARCH_PAGE_URL = "https://www.ggzy.gov.cn/deal/dealList.html"
 PUBLIC_BASE_URL = "https://www.ggzy.gov.cn/"
 DEFAULT_USER_AGENT = "BidRadar-X/1.0 (public tender notice collector)"
 OPEN_RANGE_START = date(2000, 1, 1)
@@ -298,6 +299,16 @@ def _find_content_node(root: _Node) -> _Node | None:
 
 
 def _find_embedded_notice_url(html: str, source_url: str) -> str | None:
+    script_match = re.search(
+        r"firstLastUrl\s*=\s*['\"]([^'\"]+)['\"]",
+        html,
+        flags=re.IGNORECASE,
+    )
+    if script_match:
+        resolved = urljoin(source_url, script_match.group(1))
+        if resolved.startswith(("https://", "http://")) and resolved != source_url:
+            return resolved
+
     parser = _HTMLTreeParser()
     parser.feed(html)
     for node in parser.root.iter_nodes():
@@ -456,6 +467,17 @@ def parse_search_response(payload: bytes | str | Mapping[str, Any]) -> GGZYSearc
     if not isinstance(decoded, Mapping):
         raise GGZYStructureChangedError("search response root is not an object")
 
+    response_code = _mapping_value(decoded, "code", "status", "statusCode")
+    response_message = str(_mapping_value(decoded, "msg", "message") or "")
+    if response_code is not None and str(response_code) not in {"0", "200"}:
+        if str(response_code) in {"401", "403", "407", "429", "451", "829"} or _looks_restricted(200, response_message):
+            raise GGZYAccessRestrictedError(
+                response_message or "platform requested human verification"
+            )
+        raise GGZYStructureChangedError(
+            f"search API returned code {response_code}: {response_message or 'unknown error'}"
+        )
+
     raw_data = _mapping_value(decoded, "data", "rows", "records", "list")
     nested_meta: Mapping[str, Any] = {}
     if isinstance(raw_data, Mapping):
@@ -495,7 +517,7 @@ def parse_search_response(payload: bytes | str | Mapping[str, Any]) -> GGZYSearc
         if not isinstance(raw_item, Mapping):
             raise GGZYStructureChangedError(f"search result {index} is not an object")
         title = _mapping_value(raw_item, "title", "noticeTitle", "projectName")
-        link = _mapping_value(raw_item, "linkurl", "linkUrl", "detailUrl", "href")
+        link = _mapping_value(raw_item, "url", "linkurl", "linkUrl", "detailUrl", "href")
         if not title or not link:
             raise GGZYStructureChangedError(
                 f"search result {index} is missing title or detail URL"
@@ -516,13 +538,14 @@ def parse_search_response(payload: bytes | str | Mapping[str, Any]) -> GGZYSearc
             "originalUrl",
         )
         region_field, region_value = _mapping_entry(
-            raw_item, "province", "region", "area"
+            raw_item, "provinceText", "province", "region", "area"
         )
         source_name_field, source_name_value = _mapping_entry(
             raw_item,
             "platform",
             "platformName",
             "sourceName",
+            "transactionSourcesPlatformText",
         )
         results.append(
             GGZYSearchResult(
@@ -574,6 +597,16 @@ def _notice_type(title: str) -> str:
     if re.search(r"终止|废标|流标|取消", title):
         return "cancellation"
     return "tender"
+
+
+def _looks_like_active_procurement_title(title: str) -> bool:
+    """Reject lifecycle-complete and asset-trading rows before detail parsing."""
+
+    return not re.search(
+        r"中标|成交|结果公示|候选人|废标|流标|终止|取消|"
+        r"转让|拍卖|挂牌(?:披露|出让)|出租|竞价",
+        title,
+    )
 
 
 def _fingerprint(*values: str) -> str:
@@ -630,6 +663,14 @@ class GGZYSource:
             else TaskSpec.model_validate(task_spec)
         )
         plan = dict(search_plan or {})
+        max_pages = min(
+            max(int(plan.get("max_pages", self._max_pages)), 1),
+            self._max_pages,
+        )
+        max_results = min(
+            max(int(plan.get("max_results_per_source", 24)), 1),
+            60,
+        )
         now = self._now()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now() must return a timezone-aware datetime")
@@ -648,6 +689,12 @@ class GGZYSource:
         else:
             end_date = today
         topic = _clean_inline(str(plan.get("query") or task.topic))
+        planned_topics = [
+            _clean_inline(str(value))
+            for value in plan.get("search_terms", [])
+            if _clean_inline(str(value))
+        ][:6]
+        search_topics = list(dict.fromkeys(planned_topics)) or [topic]
         topic_terms = list(
             dict.fromkeys(
                 cleaned
@@ -659,36 +706,47 @@ class GGZYSource:
         detail_results: dict[str, tuple[GGZYSearchResult, dict[str, str]]] = {}
 
         for requested_region in requested_regions:
-            page_number = 1
-            while page_number <= self._max_pages:
-                form = self._search_form(
-                    topic=topic,
-                    region=requested_region,
-                    start_date=start_date.isoformat(),
-                    end_date=end_date.isoformat(),
-                    page_number=page_number,
-                    plan=plan,
-                )
-                response = await self._request("POST", SEARCH_URL, data=form)
-                search_page = parse_search_response(response.body)
-                for result in search_page.results:
-                    detail_results.setdefault(result.source_url, (result, dict(form)))
+            if len(detail_results) >= max_results:
+                break
+            for search_topic in search_topics:
+                if len(detail_results) >= max_results:
+                    break
+                page_number = 1
+                while page_number <= max_pages:
+                    form = self._search_form(
+                        topic=search_topic,
+                        region=requested_region,
+                        start_date=start_date.isoformat(),
+                        end_date=end_date.isoformat(),
+                        page_number=page_number,
+                        plan=plan,
+                    )
+                    response = await self._request("POST", SEARCH_URL, data=form)
+                    search_page = parse_search_response(response.body)
+                    for result in search_page.results:
+                        detail_results.setdefault(result.source_url, (result, dict(form)))
+                        if len(detail_results) >= max_results:
+                            break
 
-                if not search_page.results:
-                    break
-                if (
-                    search_page.total_pages is not None
-                    and page_number >= search_page.total_pages
-                ):
-                    break
-                page_number += 1
-            else:
-                raise GGZYSourceError(
-                    f"search exceeded the configured max_pages={self._max_pages}"
-                )
+                    if len(detail_results) >= max_results:
+                        break
+                    if not search_page.results:
+                        break
+                    if (
+                        search_page.total_pages is not None
+                        and page_number >= search_page.total_pages
+                    ):
+                        break
+                    page_number += 1
+                else:
+                    raise GGZYSourceError(
+                        f"search exceeded the configured max_pages={max_pages}"
+                    )
 
         notices: list[TenderNotice] = []
         for result, search_form in detail_results.values():
+            if not _looks_like_active_procurement_title(result.title):
+                continue
             response = await self._request("GET", result.source_url, data=None)
             detail_html = response.text()
             canonical_notice_url = (
@@ -778,24 +836,31 @@ class GGZYSource:
         page_number: int,
         plan: Mapping[str, Any],
     ) -> dict[str, str]:
-        return {
-            "TIMEBEGIN_SHOW": start_date,
-            "TIMEEND_SHOW": end_date,
+        form = {
             "TIMEBEGIN": start_date,
             "TIMEEND": end_date,
             "SOURCE_TYPE": str(plan.get("source_type", "1")),
-            "DEAL_TIME": str(plan.get("deal_time", "02")),
+            "DEAL_TIME": str(plan.get("deal_time", "06")),
+            "DEAL_STAGE": str(plan.get("deal_stage", "0001")),
+            "PAGENUMBER": str(page_number),
+            "FINDTXT": topic,
+        }
+        optional_filters = {
             "DEAL_CLASSIFY": str(plan.get("deal_classify", "00")),
-            "DEAL_STAGE": str(plan.get("deal_stage", "0000")),
             "DEAL_PROVINCE": _province_code(region),
             "DEAL_CITY": str(plan.get("deal_city", "0")),
             "DEAL_PLATFORM": str(plan.get("deal_platform", "0")),
             "BID_PLATFORM": str(plan.get("bid_platform", "0")),
             "DEAL_TRADE": str(plan.get("deal_trade", "0")),
-            "isShowAll": "1",
-            "PAGENUMBER": str(page_number),
-            "FINDTXT": topic,
         }
+        form.update(
+            {
+                key: value
+                for key, value in optional_filters.items()
+                if value not in {"0", "00", ""}
+            }
+        )
+        return form
 
     async def _request(
         self,
@@ -812,7 +877,8 @@ class GGZYSource:
         headers = {
             "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
-            "Referer": "https://deal.ggzy.gov.cn/ds/deal/dealList.jsp",
+            "Referer": SEARCH_PAGE_URL,
+            "X-Pass-Token": "",
         }
         if data is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
