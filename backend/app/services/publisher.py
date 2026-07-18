@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
 from pathlib import Path
 import shutil
+from threading import Lock
 import time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -40,13 +42,23 @@ class Publisher:
         repository = Repository()
         historical = repository.latest_generated_delivery(state["task_id"])
         committed_snapshots = repository.load_project_snapshots(state["task_id"])
-        if not changes and historical is not None:
+        if not changes:
             historical_report = None
-            if historical.get("artifact_uri"):
+            if historical is not None and historical.get("artifact_uri"):
+                historical_documents = self._documents_from_artifact(
+                    REPORT_DIR / historical["artifact_uri"]
+                )
+                first_document = historical_documents[0] if historical_documents else None
                 historical_report = {
-                    "filename": historical["artifact_uri"],
-                    "download_url": f"/api/reports/{historical['delivery_fingerprint']}/download",
+                    "filename": first_document["artifact_uri"] if first_document else None,
+                    "download_url": (
+                        f"/api/reports/{historical['delivery_fingerprint']}/download"
+                        if first_document
+                        else None
+                    ),
                     "delivery_fingerprint": historical["delivery_fingerprint"],
+                    "documents": historical_documents,
+                    "document_count": len(historical_documents),
                 }
             return {
                 "status": "no_change",
@@ -57,6 +69,8 @@ class Publisher:
                 "format": "docx",
                 "report_scope": "incremental",
                 "notice_count": 0,
+                "document_count": 0,
+                "documents": [],
                 "reused_artifact": False,
                 "delivery_fingerprint": None,
                 **outcomes,
@@ -106,13 +120,15 @@ class Publisher:
         reused_artifact = False
         if acquired:
             try:
-                report_path, reused_artifact = self._publish_delivery_report(
+                manifest_path, documents, reused_artifact = self._publish_delivery_reports(
                     query=state["query"],
-                    notices=notices,
+                    report_projects=report_projects,
+                    changes=changes,
                     task_id=state["task_id"],
                     run_id=state["run_id"],
                     report_scope=report_scope,
                     delivery_fingerprint=delivery_fingerprint,
+                    ai_report=state.get("ai_report"),
                 )
             except Exception as error:
                 repository.mark_delivery_failed(
@@ -122,19 +138,26 @@ class Publisher:
                 )
                 raise DeliveryPublishError(delivery_fingerprint, error) from error
         else:
-            report_path = self._wait_for_committed_artifact(
+            manifest_path = self._wait_for_committed_artifact(
                 repository,
                 delivery_fingerprint,
             )
+            documents = self._documents_from_artifact(manifest_path)
             reused_artifact = True
+        if not documents:
+            raise RuntimeError("generated delivery does not contain project documents")
+        first_document = documents[0]
         return {
             "status": "generated",
             "delivery_type": delivery_type,
-            "filename": report_path.name,
+            "artifact_uri": manifest_path.name,
+            "filename": first_document["artifact_uri"],
             "download_url": f"/api/reports/{delivery_fingerprint}/download",
             "format": "docx",
             "report_scope": report_scope,
             "notice_count": len(notices),
+            "document_count": len(documents),
+            "documents": documents,
             "reused_artifact": reused_artifact,
             "delivery_fingerprint": delivery_fingerprint,
             **outcomes,
@@ -189,56 +212,251 @@ class Publisher:
         }
 
     @staticmethod
-    def _publish_delivery_report(
+    def _publish_delivery_reports(
         *,
         query: str,
-        notices: list[TenderNotice],
+        report_projects: list[dict[str, Any]],
+        changes: list[dict[str, Any]],
         task_id: str,
         run_id: str,
         report_scope: str,
         delivery_fingerprint: str,
-    ) -> tuple[Path, bool]:
+        ai_report: dict[str, Any] | None = None,
+    ) -> tuple[Path, list[dict[str, Any]], bool]:
         sample_name = build_report_filename(
             query,
             datetime.now(ZoneInfo("Asia/Shanghai")),
         )
         safe_query = sample_name.rsplit("_", maxsplit=1)[0]
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
-        report_path = REPORT_DIR / f"{safe_query}_{task_id}_{delivery_fingerprint}.docx"
-        Publisher._cleanup_stale_artifacts(report_path)
-        if report_path.is_file():
-            return report_path, True
+        manifest_path = REPORT_DIR / f"{safe_query}_{task_id}_{delivery_fingerprint}.json"
+        Publisher._cleanup_stale_artifacts(manifest_path)
+        if manifest_path.is_file():
+            return manifest_path, Publisher._documents_from_artifact(manifest_path), True
 
-        lock_path = report_path.with_suffix(".lock")
+        lock_path = manifest_path.with_suffix(".lock")
         try:
             lock_file = lock_path.open("xb")
         except FileExistsError:
             for _ in range(200):
-                if report_path.is_file():
-                    return report_path, True
+                if manifest_path.is_file():
+                    return manifest_path, Publisher._documents_from_artifact(manifest_path), True
                 time.sleep(0.05)
             raise TimeoutError(f"timed out waiting for report delivery {delivery_fingerprint}")
 
         staging_dir = REPORT_DIR / ".staging" / run_id
-        staged_path: Path | None = None
+        generated_final_paths: list[Path] = []
         lock_file.close()
         try:
-            staged_path = DocxPublisher(output_dir=staging_dir).publish(
-                query=query,
-                notices=notices,
-                report_scope=report_scope,
+            generated_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+            change_types = {
+                item["project_id"]: item.get("type", "material_change")
+                for item in changes
+            }
+            ordered_projects = sorted(
+                report_projects,
+                key=Publisher._project_sort_key,
+                reverse=True,
             )
-            staged_path.replace(report_path)
+            generated_paths_lock = Lock()
+            work_items = [
+                (
+                    index,
+                    project,
+                    query,
+                    task_id,
+                    report_scope,
+                    delivery_fingerprint,
+                    safe_query,
+                    generated_at,
+                    change_types,
+                    staging_dir,
+                    ai_report,
+                    generated_final_paths,
+                    generated_paths_lock,
+                )
+                for index, project in enumerate(ordered_projects, start=1)
+            ]
+            max_workers = min(4, max(1, len(work_items)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                generated = list(executor.map(Publisher._publish_project_document, work_items))
+            documents = []
+            for document, _generated_path in generated:
+                if document is None:
+                    continue
+                documents.append(document)
+            if not documents:
+                raise RuntimeError("no changed project contains a reportable notice")
+            manifest = {
+                "version": 1,
+                "delivery_fingerprint": delivery_fingerprint,
+                "task_id": task_id,
+                "run_id": run_id,
+                "query": query,
+                "report_scope": report_scope,
+                "generated_at": generated_at.isoformat(),
+                "documents": documents,
+            }
+            staged_manifest = staging_dir / manifest_path.name
+            staged_manifest.parent.mkdir(parents=True, exist_ok=True)
+            staged_manifest.write_text(
+                json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2),
+                encoding="utf-8",
+            )
+            staged_manifest.replace(manifest_path)
         finally:
-            if staged_path is not None:
-                staged_path.unlink(missing_ok=True)
             lock_path.unlink(missing_ok=True)
-            for directory in (staging_dir, staging_dir.parent):
-                try:
-                    directory.rmdir()
-                except OSError:
-                    pass
-        return report_path, False
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            try:
+                staging_dir.parent.rmdir()
+            except OSError:
+                pass
+            if not manifest_path.is_file():
+                for path in generated_final_paths:
+                    path.unlink(missing_ok=True)
+        return manifest_path, documents, False
+
+    @staticmethod
+    def _publish_project_document(
+        work_item: tuple[Any, ...],
+    ) -> tuple[dict[str, Any] | None, Path | None]:
+        (
+            index,
+            project,
+            query,
+            task_id,
+            report_scope,
+            delivery_fingerprint,
+            safe_query,
+            generated_at,
+            change_types,
+            staging_dir,
+            ai_report,
+            generated_final_paths,
+            generated_paths_lock,
+        ) = work_item
+        project_id = str(project.get("project_id") or f"project-{index}")
+        project_notices = Publisher._deduplicated_notices([project])
+        if not project_notices:
+            return None, None
+        project_title = str(
+            project.get("title") or project_notices[0].title or f"项目 {index}"
+        )
+        document_id = sha256(
+            f"{delivery_fingerprint}:{project_id}".encode("utf-8")
+        ).hexdigest()[:16]
+        internal_name = (
+            f"{safe_query}_{task_id}_{delivery_fingerprint}.docx"
+            if index == 1
+            else f"{safe_query}_{task_id}_{delivery_fingerprint}_{document_id}.docx"
+        )
+        final_path = REPORT_DIR / internal_name
+        generated_path: Path | None = None
+        if not final_path.is_file():
+            document_staging_dir = staging_dir / document_id
+            staged_path = DocxPublisher(
+                output_dir=document_staging_dir,
+                clock=lambda value=generated_at: value,
+            ).publish(
+                query=f"{query}_{project_title}",
+                notices=project_notices,
+                report_scope=report_scope,
+                ai_report=Publisher._ai_report_for_project(project_notices, ai_report),
+            )
+            staged_path.replace(final_path)
+            generated_path = final_path
+            with generated_paths_lock:
+                generated_final_paths.append(final_path)
+        document = {
+            "document_id": document_id,
+            "project_id": project_id,
+            "project_title": project_title,
+            "filename": build_report_filename(f"{query}_{project_title}", generated_at),
+            "artifact_uri": internal_name,
+            "download_url": (
+                f"/api/reports/{delivery_fingerprint}/documents/{document_id}/download"
+            ),
+            "notice_count": len(project_notices),
+            "change_type": change_types.get(project_id, "material_change"),
+            "is_new": True,
+            "generated_at": generated_at.isoformat(),
+        }
+        return document, generated_path
+
+    @staticmethod
+    def _documents_from_artifact(artifact_path: Path) -> list[dict[str, Any]]:
+        if not artifact_path.is_file():
+            return []
+        if artifact_path.suffix.lower() == ".docx":
+            return [{
+                "document_id": sha256(artifact_path.name.encode("utf-8")).hexdigest()[:16],
+                "project_id": "legacy",
+                "project_title": "历史项目报告",
+                "filename": artifact_path.name,
+                "artifact_uri": artifact_path.name,
+                "download_url": None,
+                "notice_count": 0,
+                "change_type": "legacy",
+                "is_new": False,
+            }]
+        if artifact_path.suffix.lower() != ".json":
+            return []
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        documents = payload.get("documents") if isinstance(payload, dict) else None
+        if not isinstance(documents, list):
+            return []
+        return [item for item in documents if isinstance(item, dict)]
+
+    @staticmethod
+    def _project_sort_key(project: dict[str, Any]) -> tuple[str, str]:
+        published = max(
+            (
+                str(document.get("notice", {}).get("published_at", ""))
+                for document in project.get("documents", [])
+                if isinstance(document, dict)
+            ),
+            default="",
+        )
+        return published, str(project.get("project_id", ""))
+
+    @staticmethod
+    def _ai_report_for_project(
+        notices: list[TenderNotice],
+        ai_report: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not ai_report or ai_report.get("status") != "generated":
+            return ai_report
+        notice_ids = {notice.notice_id for notice in notices}
+        evidence_ids = {
+            evidence.evidence_id
+            for notice in notices
+            for evidence in notice.evidence
+        }
+        narratives = [
+            item
+            for item in ai_report.get("notice_narratives", [])
+            if isinstance(item, dict) and item.get("notice_id") in notice_ids
+        ]
+        findings = [
+            item
+            for item in ai_report.get("key_findings", [])
+            if isinstance(item, dict)
+            and set(item.get("evidence_ids", [])) & evidence_ids
+        ]
+        summary = "；".join(
+            str(item.get("summary", "")).strip()
+            for item in narratives
+            if str(item.get("summary", "")).strip()
+        )
+        return {
+            "status": "generated",
+            "executive_summary": summary or "本项目摘要以原公告与关联证据为准。",
+            "key_findings": findings,
+            "notice_narratives": narratives,
+        }
 
     @staticmethod
     def _cleanup_stale_artifacts(report_path: Path, *, stale_after_seconds: int = 300) -> None:

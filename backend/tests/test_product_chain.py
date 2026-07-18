@@ -14,8 +14,14 @@ from app.main import app
 from app.api import reports as reports_module
 from app.services import publisher as publisher_module
 from app.storage import database as database_module
+from app.storage.repository import Repository
 from app.workflow.nodes import source_select
-from tests.integration_support import SuccessfulSource, isolated_source_set, source_metadata
+from tests.integration_support import (
+    SuccessfulSource,
+    isolated_source_set,
+    make_notice,
+    source_metadata,
+)
 
 
 class ProductChainApiTest(unittest.TestCase):
@@ -45,6 +51,44 @@ class ProductChainApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json(), {"items": []})
 
+    def test_report_history_delete_persists_and_hides_same_query_duplicates(self) -> None:
+        repository = Repository()
+        repository.create_task("task-history-delete", "查询全国服务器采购公告", "once")
+        base_state = {
+            "task_id": "task-history-delete",
+            "status": "completed",
+            "query": "查询全国服务器采购公告",
+            "frequency": "once",
+            "projects": [],
+            "report": {"status": "no_change"},
+        }
+        repository.save_run({**base_state, "run_id": "run-history-delete-a"})
+        repository.save_run({
+            **base_state,
+            "run_id": "run-history-delete-b",
+            "frequency": "weekly",
+        })
+
+        before = self.client.get("/api/reports")
+        self.assertEqual(before.status_code, 200, before.text)
+        self.assertEqual(len(before.json()["items"]), 1)
+        visible_run_id = before.json()["items"][0]["run_id"]
+
+        deleted = self.client.delete(f"/api/reports/{visible_run_id}")
+        self.assertEqual(deleted.status_code, 204, deleted.text)
+
+        after_refresh = self.client.get("/api/reports")
+        self.assertEqual(after_refresh.status_code, 200, after_refresh.text)
+        self.assertEqual(after_refresh.json(), {"items": []})
+        with database_module.connect() as connection:
+            hidden = connection.execute(
+                "SELECT run_id FROM hidden_report_runs ORDER BY run_id"
+            ).fetchall()
+        self.assertEqual(
+            [row["run_id"] for row in hidden],
+            ["run-history-delete-a", "run-history-delete-b"],
+        )
+
     def test_completed_run_is_listed_with_a_controlled_docx_download(self) -> None:
         query = f"查询 2026-07-14 全国服务器采购公告 {uuid4()}"
         with patch.object(source_select, "SOURCE_ADAPTERS", isolated_source_set()):
@@ -61,7 +105,20 @@ class ProductChainApiTest(unittest.TestCase):
         self.assertEqual(item["run_id"], run["run_id"])
         self.assertEqual(item["task_id"], run["task_id"])
         self.assertEqual(item["query"], query)
+        self.assertNotEqual(item["display_title"], query)
+        self.assertNotIn("-", item["display_title"])
         self.assertEqual(item["report"]["status"], "available")
+        self.assertIn(item["ai_report"]["status"], {"generated", "not_generated"})
+        self.assertEqual(len(item["projects"]), 1)
+        online_project = item["projects"][0]
+        self.assertEqual(online_project["title"], "某单位服务器采购公告")
+        self.assertEqual(online_project["published_at"], "2026-07-14T09:00:00+08:00")
+        self.assertEqual(online_project["url"], "https://public-a.gov.cn/notices/real-001")
+        self.assertEqual(online_project["summary"], "采购服务器及配套服务，来源记录 a。")
+        self.assertEqual(
+            online_project["attachments"][0]["url"],
+            "https://public-a.gov.cn/notices/real-001/attachment.pdf",
+        )
 
         download = self.client.get(item["report"]["download_url"])
         self.assertEqual(download.status_code, 200, download.text)
@@ -99,6 +156,7 @@ class ProductChainApiTest(unittest.TestCase):
             project["url"],
             "https://public-a.gov.cn/notices/real-001",
         )
+        self.assertEqual(project["attachments"][0]["name"], "采购需求附件.pdf")
 
         detail_response = self.client.get(
             f"/api/runs/{run['run_id']}/projects/{project['project_id']}"
@@ -132,6 +190,55 @@ class ProductChainApiTest(unittest.TestCase):
             report["download_url"],
             f"/api/reports/{report['delivery_fingerprint']}/download",
         )
+
+    def test_each_changed_project_has_an_independent_downloadable_word_file(self) -> None:
+        sources = isolated_source_set()
+        second_notice = make_notice(
+            source_id="public-a",
+            source_name="公开来源 A",
+            source_url="https://public-a.gov.cn/notices/storage-002",
+            marker="c",
+            project_fingerprint="9" * 64,
+        ).model_copy(
+            update={
+                "notice_id": "public-a-storage-002",
+                "title": "新增存储设备采购公告",
+                "notice_stable_fingerprint": "8" * 64,
+                "raw_content_fingerprint": "7" * 64,
+            }
+        )
+        sources[0].notices.append(second_notice)
+        with patch.object(source_select, "SOURCE_ADAPTERS", sources):
+            response = self.client.post(
+                "/api/tasks/run",
+                json={"query": f"查询服务器和存储设备采购 {uuid4()}", "frequency": "daily"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        run = response.json()
+        report = self.client.get(f"/api/runs/{run['run_id']}/report").json()
+        self.assertEqual(report["status"], "available")
+        self.assertEqual(report["document_count"], 2)
+        self.assertEqual(len(report["documents"]), 2)
+        self.assertEqual(len({item["download_url"] for item in report["documents"]}), 2)
+        self.assertTrue(all(item["is_new"] for item in report["documents"]))
+        self.assertTrue(all(item["status"] == "available" for item in report["documents"]))
+
+        by_title = {item["project_title"]: item for item in report["documents"]}
+        for title, document_view in by_title.items():
+            download = self.client.get(document_view["download_url"])
+            self.assertEqual(download.status_code, 200, download.text)
+            document = Document(BytesIO(download.content))
+            text = "\n".join(
+                paragraph.text
+                for table in document.tables
+                for row in table.rows
+                for cell in row.cells
+                for paragraph in cell.paragraphs
+            )
+            self.assertIn(title, text)
+            other_titles = set(by_title) - {title}
+            self.assertTrue(all(other_title not in text for other_title in other_titles))
 
     def test_failed_task_returns_a_structured_error_without_internal_details(self) -> None:
         with (
@@ -213,7 +320,7 @@ class ProductChainApiTest(unittest.TestCase):
         with patch.object(source_select, "SOURCE_ADAPTERS", isolated_source_set()):
             run = self.client.post(
                 "/api/tasks/run",
-                json={"query": f"查询待删除报告 {uuid4()}", "frequency": "once"},
+                json={"query": f"查询待删除服务器报告 {uuid4()}", "frequency": "once"},
             ).json()
         report = self.client.get(f"/api/runs/{run['run_id']}/report").json()
         download_url = report["download_url"]

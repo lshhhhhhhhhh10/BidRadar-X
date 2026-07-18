@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from app.schemas.tender import (
+    Attachment,
     EvidenceReference,
     SourceRecord,
     TaskSpec,
@@ -188,6 +189,9 @@ class _DetailParser(HTMLParser):
         self._content_depth = 0
         self._skip_depth = 0
         self._parts: list[str] = []
+        self.attachments: list[tuple[str, str | None]] = []
+        self._anchor_href: str | None = None
+        self._anchor_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
@@ -203,10 +207,15 @@ class _DetailParser(HTMLParser):
                 self._skip_depth += 1
             if not self._skip_depth and tag in {"p", "div", "h1", "h2", "h3", "h4", "li", "tr"}:
                 self._parts.append("\n")
+            if not self._skip_depth and tag == "a" and attributes.get("href"):
+                self._anchor_href = attributes["href"]
+                self._anchor_parts = []
 
     def handle_data(self, data: str) -> None:
         if self._content_depth and not self._skip_depth:
             self._parts.append(data)
+            if self._anchor_href is not None:
+                self._anchor_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
         if not self._content_depth:
@@ -215,6 +224,11 @@ class _DetailParser(HTMLParser):
             self._skip_depth -= 1
         if not self._skip_depth and tag in {"p", "div", "h1", "h2", "h3", "h4", "li", "tr"}:
             self._parts.append("\n")
+        if tag == "a" and self._anchor_href is not None:
+            name = _clean_inline(" ".join(self._anchor_parts)) or None
+            self.attachments.append((self._anchor_href, name))
+            self._anchor_href = None
+            self._anchor_parts = []
         if tag == "div":
             self._content_depth -= 1
             if not self._content_depth:
@@ -271,6 +285,12 @@ class ShanghaiGGZYSource:
         if task.regions and not any("上海" in region for region in task.regions):
             return []
         terms = _query_terms(task, plan)
+        planned_terms = [
+            str(value).strip()
+            for value in plan.get("search_terms", [])
+            if str(value).strip()
+        ][:6]
+        search_terms: list[str | None] = list(dict.fromkeys(planned_terms)) or [None]
         max_pages = max(1, min(int(plan.get("max_pages", 1)), 10))
         notices: list[TenderNotice] = []
         seen: set[str] = set()
@@ -280,59 +300,64 @@ class ShanghaiGGZYSource:
         )
 
         for channel_id, channel_label in self.ENABLED_CHANNELS.items():
-            for page in range(1, max_pages + 1):
-                list_url = (
-                    self.LIST_URL
-                    if page == 1
-                    else f"https://www.shggzy.com/search/queryContents_{page}.jhtml"
-                )
-                response = await self._request(
-                    list_url,
-                    params=self._list_params(task, channel_id),
-                )
-                parser = _ListParser()
-                parser.feed(response.text)
-                if not parser.found_list or channel_id not in parser.channel_ids:
-                    raise ShanghaiGGZYStructureChangedError(
-                        "Shanghai list category or result container changed"
+            for search_term in search_terms:
+                for page in range(1, max_pages + 1):
+                    list_url = (
+                        self.LIST_URL
+                        if page == 1
+                        else f"https://www.shggzy.com/search/queryContents_{page}.jhtml"
                     )
-                if not parser.items:
-                    break
-                for item in parser.items:
-                    if not _is_shanghai_url(item.detail_url) or _has_conflict(item.title):
-                        continue
-                    if item.project_code and item.project_code in blocked_project_codes:
-                        continue
-                    matched_terms = _matched_terms(item.title, terms)
-                    if terms and not matched_terms:
-                        continue
-                    if any(
-                        exclusion.casefold() in item.title.casefold()
-                        for exclusion in task.exclusions
-                        if exclusion.strip()
-                    ):
-                        continue
-                    if (
-                        task.time_range_start is not None
-                        and item.published_at < task.time_range_start
-                    ) or (
-                        task.time_range_end is not None
-                        and item.published_at > task.time_range_end
-                    ):
-                        continue
-                    detail = await self._request(item.detail_url, params=None)
-                    notice = self._parse_notice(
-                        item,
-                        detail_html=detail.text,
-                        channel_id=channel_id,
-                        channel_label=channel_label,
-                        matched_terms=matched_terms,
-                        fetched_at=fetched_at,
+                    response = await self._request(
+                        list_url,
+                        params=self._list_params(
+                            task,
+                            channel_id,
+                            search_term=search_term,
+                        ),
                     )
-                    if notice is None or notice.notice_stable_fingerprint in seen:
-                        continue
-                    seen.add(notice.notice_stable_fingerprint)
-                    notices.append(notice)
+                    parser = _ListParser()
+                    parser.feed(response.text)
+                    if not parser.found_list or channel_id not in parser.channel_ids:
+                        raise ShanghaiGGZYStructureChangedError(
+                            "Shanghai list category or result container changed"
+                        )
+                    if not parser.items:
+                        break
+                    for item in parser.items:
+                        if not _is_shanghai_url(item.detail_url) or _has_conflict(item.title):
+                            continue
+                        if item.project_code and item.project_code in blocked_project_codes:
+                            continue
+                        matched_terms = _matched_terms(item.title, terms)
+                        if terms and not matched_terms:
+                            continue
+                        if any(
+                            exclusion.casefold() in item.title.casefold()
+                            for exclusion in task.exclusions
+                            if exclusion.strip()
+                        ):
+                            continue
+                        if (
+                            task.time_range_start is not None
+                            and item.published_at < task.time_range_start
+                        ) or (
+                            task.time_range_end is not None
+                            and item.published_at > task.time_range_end
+                        ):
+                            continue
+                        detail = await self._request(item.detail_url, params=None)
+                        notice = self._parse_notice(
+                            item,
+                            detail_html=detail.text,
+                            channel_id=channel_id,
+                            channel_label=channel_label,
+                            matched_terms=matched_terms,
+                            fetched_at=fetched_at,
+                        )
+                        if notice is None or notice.notice_stable_fingerprint in seen:
+                            continue
+                        seen.add(notice.notice_stable_fingerprint)
+                        notices.append(notice)
         return notices
 
     async def _blocked_project_codes(
@@ -397,11 +422,16 @@ class ShanghaiGGZYSource:
         return response
 
     @staticmethod
-    def _list_params(task: TaskSpec, channel_id: str) -> dict[str, str]:
+    def _list_params(
+        task: TaskSpec,
+        channel_id: str,
+        *,
+        search_term: str | None = None,
+    ) -> dict[str, str]:
         return {
             # Search by the user's confirmed subject at the source.  Previously
             # this was blank, so only the latest generic pages were inspected.
-            "title": task.topic,
+            "title": search_term or task.topic,
             "channelId": channel_id,
             "origin": "",
             "inDates": "",
@@ -514,6 +544,22 @@ class ShanghaiGGZYSource:
                 )
             )
         source_notice_id = urlparse(item.detail_url).path.rstrip("/").rsplit("/", 1)[-1]
+        attachments: list[Attachment] = []
+        seen_attachment_urls: set[str] = set()
+        for href, name in parser.attachments:
+            attachment_url = urljoin(item.detail_url, href)
+            if not _looks_like_attachment(attachment_url, name):
+                continue
+            if attachment_url in seen_attachment_urls:
+                continue
+            seen_attachment_urls.add(attachment_url)
+            attachments.append(
+                Attachment(
+                    attachment_id=f"shggzy-attachment-{_sha256(attachment_url)[:20]}",
+                    name=name,
+                    url=attachment_url,
+                )
+            )
         project_title = re.sub(
             r"(?:资格预审|招标|公告|公示|第.+?次)", "", item.title
         )
@@ -533,6 +579,7 @@ class ShanghaiGGZYSource:
                 authority=self.metadata["authority"],
             ),
             core_content=body[:100_000],
+            attachments=attachments,
             region=region,
             topic_keywords=matched_terms,
             deadline=deadline,
@@ -679,6 +726,13 @@ def _title_contradicts(title: str, notice_type: str) -> bool:
     if notice_type == "tender" and ("资格预审" in title or "资审公告" in title):
         return True
     return _has_conflict(title)
+
+
+def _looks_like_attachment(url: str, name: str | None) -> bool:
+    path = urlparse(url).path.casefold()
+    if re.search(r"\.(?:pdf|docx?|xlsx?|zip|rar|7z)(?:$|[?#])", path):
+        return True
+    return bool(re.search(r"附件|下载|采购文件|招标文件|资格预审文件", name or ""))
 
 
 def _is_shanghai_url(value: str) -> bool:

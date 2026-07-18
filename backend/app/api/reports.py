@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from hashlib import sha256
+import json
 import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response, status
 from fastapi.responses import FileResponse
 
+from .projects import load_project_summaries
+from ..intelligence.task_title import summarized_task_title
 from ..services.demo_shanghai_property import (
     DEMO_QUERY,
     demo_notices,
@@ -27,7 +31,21 @@ def list_reports() -> dict[str, list[dict]]:
     items = repository.list_report_history()
     for item in items:
         item["report"] = _report_view(repository, item.pop("report", None))
+        run = repository.get_run(item["run_id"])
+        item["display_title"] = summarized_task_title(
+            run.get("task_spec") if isinstance(run, dict) else None,
+            fallback_query=item.get("query", ""),
+        )
+        item["projects"] = load_project_summaries(repository, run) if run else []
+        item["sources"] = _source_outcomes(run)
     return {"items": items}
+
+
+@router.delete("/reports/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+def hide_report_history(run_id: str) -> Response:
+    if not Repository().hide_report_run(run_id):
+        raise HTTPException(status_code=404, detail="run not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/runs/{run_id}/report")
@@ -41,15 +59,45 @@ def get_run_report(run_id: str) -> dict:
 
 @router.get("/reports/{delivery_fingerprint}/download")
 def download_report(delivery_fingerprint: str) -> FileResponse:
+    """Compatibility route: download the first project document in a delivery."""
+
+    return _download_delivery_document(delivery_fingerprint)
+
+
+@router.get("/reports/{delivery_fingerprint}/documents/{document_id}/download")
+def download_report_document(
+    delivery_fingerprint: str,
+    document_id: str,
+) -> FileResponse:
+    return _download_delivery_document(delivery_fingerprint, document_id)
+
+
+def _download_delivery_document(
+    delivery_fingerprint: str,
+    document_id: str | None = None,
+) -> FileResponse:
     if re.fullmatch(r"[0-9a-f]{64}", delivery_fingerprint) is None:
         raise HTTPException(status_code=400, detail="invalid report identifier")
+    if document_id is not None and re.fullmatch(r"[0-9a-f]{16}", document_id) is None:
+        raise HTTPException(status_code=400, detail="invalid document identifier")
     repository = Repository()
     delivery = repository.get_delivery(delivery_fingerprint)
     if delivery is None:
         raise HTTPException(status_code=404, detail="report not found")
     if delivery["status"] not in {"generated", "delivered"}:
         raise HTTPException(status_code=409, detail="report is not available")
-    report_path = _safe_report_path(delivery.get("artifact_uri"))
+    documents = _delivery_documents(repository, delivery)
+    document = next(
+        (
+            item
+            for item in documents
+            if document_id is None or item["document_id"] == document_id
+        ),
+        None,
+    )
+    if document is None:
+        raise HTTPException(status_code=409, detail="report artifact is invalid")
+    report_path = _safe_docx_path(document.get("artifact_uri"))
     if report_path is None:
         raise HTTPException(status_code=409, detail="report artifact is invalid")
     if not report_path.is_file():
@@ -57,7 +105,7 @@ def download_report(delivery_fingerprint: str) -> FileResponse:
     return FileResponse(
         report_path,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=_download_filename(repository, delivery, report_path.name),
+        filename=str(document.get("filename") or report_path.name),
     )
 
 
@@ -141,21 +189,48 @@ def _report_view(repository: Repository, report: object) -> dict:
         }
     if delivery is None or report.get("status") != "generated":
         return {**base, "status": "not_generated"}
-    report_path = _safe_report_path(delivery.get("artifact_uri"))
-    if report_path is None or not report_path.is_file():
+    artifact_path = _safe_artifact_path(delivery.get("artifact_uri"))
+    documents = _delivery_documents(repository, delivery)
+    if artifact_path is None or not artifact_path.is_file() or not documents:
         return {
             **base,
             "status": "missing",
             "delivery_fingerprint": fingerprint,
             "filename": delivery.get("artifact_uri"),
+            "documents": [],
+            "document_count": 0,
         }
+    available_documents = [item for item in documents if item["status"] == "available"]
+    status = "available" if len(available_documents) == len(documents) else "missing"
+    first_document = documents[0]
     return {
         **base,
-        "status": "available",
+        "status": status,
         "delivery_fingerprint": fingerprint,
-        "filename": _download_filename(repository, delivery, report_path.name),
+        "filename": first_document["filename"],
         "download_url": f"/api/reports/{fingerprint}/download",
+        "documents": documents,
+        "document_count": len(documents),
     }
+
+
+def _source_outcomes(run: object) -> list[dict]:
+    if not isinstance(run, dict):
+        return []
+    outcomes: list[dict] = []
+    for source in run.get("selected_sources", []):
+        if not isinstance(source, dict):
+            continue
+        outcomes.append(
+            {
+                "source_id": source.get("source_id") or source.get("id"),
+                "name": source.get("name") or source.get("source_id") or "未知来源",
+                "status": source.get("collection_status") or "not_attempted",
+                "record_count": int(source.get("record_count") or 0),
+                "requires_login": bool(source.get("requires_login") or source.get("requires_auth")),
+            }
+        )
+    return outcomes
 
 
 def _download_filename(
@@ -178,14 +253,85 @@ def _download_filename(
     return build_report_filename(run["query"], timestamp)
 
 
-def _safe_report_path(artifact_uri: object) -> Path | None:
+def _delivery_documents(repository: Repository, delivery: dict) -> list[dict]:
+    artifact_path = _safe_artifact_path(delivery.get("artifact_uri"))
+    if artifact_path is None or not artifact_path.is_file():
+        return []
+    fingerprint = str(delivery.get("delivery_fingerprint") or "")
+    if artifact_path.suffix.lower() == ".docx":
+        document_id = sha256(artifact_path.name.encode("utf-8")).hexdigest()[:16]
+        return [{
+            "document_id": document_id,
+            "project_id": "legacy",
+            "project_title": "历史项目报告",
+            "filename": _download_filename(repository, delivery, artifact_path.name),
+            "artifact_uri": artifact_path.name,
+            "download_url": f"/api/reports/{fingerprint}/download",
+            "notice_count": 0,
+            "change_type": "legacy",
+            "is_new": False,
+            "generated_at": delivery.get("generated_at") or delivery.get("created_at"),
+            "status": "available",
+        }]
+    try:
+        manifest = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(manifest, dict) or manifest.get("delivery_fingerprint") != fingerprint:
+        return []
+    raw_documents = manifest.get("documents")
+    if not isinstance(raw_documents, list):
+        return []
+    documents: list[dict] = []
+    for raw in raw_documents:
+        if not isinstance(raw, dict):
+            continue
+        document_id = raw.get("document_id")
+        if not isinstance(document_id, str) or re.fullmatch(r"[0-9a-f]{16}", document_id) is None:
+            continue
+        document_path = _safe_docx_path(raw.get("artifact_uri"))
+        if document_path is None:
+            continue
+        public_filename = raw.get("filename")
+        if (
+            not isinstance(public_filename, str)
+            or Path(public_filename).name != public_filename
+            or not public_filename.lower().endswith(".docx")
+        ):
+            public_filename = document_path.name
+        documents.append({
+            "document_id": document_id,
+            "project_id": str(raw.get("project_id") or ""),
+            "project_title": str(raw.get("project_title") or "未命名项目"),
+            "filename": public_filename,
+            "artifact_uri": document_path.name,
+            "download_url": (
+                f"/api/reports/{fingerprint}/documents/{document_id}/download"
+            ),
+            "notice_count": int(raw.get("notice_count") or 0),
+            "change_type": str(raw.get("change_type") or "material_change"),
+            "is_new": bool(raw.get("is_new", True)),
+            "generated_at": raw.get("generated_at") or manifest.get("generated_at"),
+            "status": "available" if document_path.is_file() else "missing",
+        })
+    return documents
+
+
+def _safe_artifact_path(artifact_uri: object) -> Path | None:
     if not isinstance(artifact_uri, str) or not artifact_uri:
         return None
     artifact = Path(artifact_uri)
-    if artifact.name != artifact_uri or artifact.suffix.lower() != ".docx":
+    if artifact.name != artifact_uri or artifact.suffix.lower() not in {".docx", ".json"}:
         return None
     root = REPORT_DIR.resolve()
     candidate = (root / artifact_uri).resolve()
     if candidate.parent != root:
+        return None
+    return candidate
+
+
+def _safe_docx_path(artifact_uri: object) -> Path | None:
+    candidate = _safe_artifact_path(artifact_uri)
+    if candidate is None or candidate.suffix.lower() != ".docx":
         return None
     return candidate

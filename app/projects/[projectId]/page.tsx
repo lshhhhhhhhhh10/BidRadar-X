@@ -14,6 +14,7 @@ import {
   SHANGHAI_PROPERTY_DEMO_ID,
   SHANGHAI_PROPERTY_DEMO_PROJECTS,
 } from "@/lib/demo-tenders";
+import { InfoTip } from "@/app/components/InfoTip";
 
 
 export default function ProjectRequirementsPage() {
@@ -75,32 +76,36 @@ export default function ProjectRequirementsPage() {
   }, [isDemo, projectId, runId, taskId]);
 
   const backHref = isDemo
-    ? `/projects?demo=${encodeURIComponent(SHANGHAI_PROPERTY_DEMO_ID)}`
-    : `/projects?run=${encodeURIComponent(runId)}&task=${encodeURIComponent(taskId)}`;
+    ? "/reports/demo-shanghai-property"
+    : `/reports?run=${encodeURIComponent(runId)}`;
 
   return (
     <div className="requirements-page requirements-workbench-page">
       <header className="requirements-header">
-        <Link className="outline-action" href={backHref}>返回项目列表</Link>
+        <Link className="outline-action" href={backHref}>返回项目报告</Link>
         <div>
-          <p className="section-kicker">LLM-PARSED REQUIREMENTS</p>
           <h1>{project?.title ?? "招标项目具体信息"}</h1>
           {project && <p>{project.project_code || "项目编号未披露"} · {project.purchaser} · {project.source_name}</p>}
         </div>
-        <span className="objective-badge">{isDemo ? "合成演示 · 不代表真实公告" : "8 个固定模块 · 条款动态识别"}</span>
+        <span className="objective-badge">{isDemo ? "合成演示" : "结构化详情"}</span>
       </header>
 
       <main className="requirements-main requirements-workbench-main">
         {loading && <div className="status-panel" role="status">正在读取项目内容…</div>}
         {error && <div className="status-panel error-panel" role="alert">{error}</div>}
-        {project && <RequirementsWorkbench key={project.project_id} project={project} />}
+        {project && <RequirementsWorkbench key={project.project_id} project={project} demo={isDemo} />}
       </main>
     </div>
   );
 }
 
 
-function RequirementsWorkbench({ project }: { project: ProjectProfile }) {
+function RequirementsWorkbench({ project, demo }: { project: ProjectProfile; demo: boolean }) {
+  return demo ? <DemoRequirements project={project} /> : <VerifiedRequirements project={project} />;
+}
+
+
+function DemoRequirements({ project }: { project: ProjectProfile }) {
   const templates = useMemo(() => createRequirementTemplates(project), [project]);
   const [selectedTemplateId, setSelectedTemplateId] = useState(templates[0]?.id ?? "");
   const [draftText, setDraftText] = useState(templates[0]?.rawText ?? "");
@@ -142,9 +147,7 @@ function RequirementsWorkbench({ project }: { project: ProjectProfile }) {
       <section className="llm-parser-panel" aria-labelledby="parser-title">
         <div className="llm-parser-heading">
           <div>
-            <p className="section-kicker">MOCK LLM ANALYZER</p>
-            <h2 id="parser-title">按模块查看原文条款</h2>
-            <p>全文识别结果始终同时作用于下方八个模块；选择模块只切换文本框中的原文片段，每行对应一个字段。</p>
+            <span className="title-with-info"><h2 id="parser-title">按模块查看原文条款</h2><InfoTip text="系统按八个常用投标模块整理原文证据；选择模块只切换当前查看的原文片段。" /></span>
           </div>
           <span className="parser-score">已识别 {foundTotal} / {itemTotal}</span>
         </div>
@@ -168,7 +171,6 @@ function RequirementsWorkbench({ project }: { project: ProjectProfile }) {
           <textarea value={draftText} onChange={(event) => setDraftText(event.target.value)} />
         </label>
         <div className="parser-actions">
-          <span>可直接编辑当前模块原文；保存后会重新计算整份文件的识别结果。</span>
           <button type="button" onClick={reparseSelectedModule}>更新此模块并重新解析全文</button>
         </div>
       </section>
@@ -204,6 +206,42 @@ function RequirementsWorkbench({ project }: { project: ProjectProfile }) {
             </div>
           </article>
         ))}
+      </section>
+    </>
+  );
+}
+
+
+function VerifiedRequirements({ project }: { project: ProjectProfile }) {
+  return (
+    <>
+      <section className="project-objective-summary requirements-project-summary">
+        <span>项目摘要</span>
+        <p>{project.summary || "公告没有提供可核验的摘要。"}</p>
+        <dl>
+          <div><dt>发布时间</dt><dd>{project.published_at.slice(0, 10) || "未披露"}</dd></div>
+          <div><dt>投标截止</dt><dd>{project.deadline?.replace("T", " ").slice(0, 16) || "未披露"}</dd></div>
+          <div><dt>证据数量</dt><dd>{project.evidence_count} 条</dd></div>
+        </dl>
+      </section>
+      <section className="verified-requirements" aria-labelledby="verified-requirements-title">
+        <header className="title-with-info">
+          <h2 id="verified-requirements-title">已核验条款</h2>
+          <InfoTip text="这里只展示来源公告或已归档招标文件中具有字段级证据的条款；没有证据时不会使用演示内容补齐。" />
+        </header>
+        {project.modules.length ? (
+          <div className="verified-module-list">
+            {project.modules.map((module, index) => (
+              <article className="verified-module-card" key={module.id}>
+                <header><span>{String(index + 1).padStart(2, "0")}</span><div><h3>{module.title}</h3>{module.summary && <p>{module.summary}</p>}</div></header>
+                {module.facts.length > 0 && <dl>{module.facts.map((fact) => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd><small>{fact.source}</small></div>)}</dl>}
+                {module.tables.map((table) => (
+                  <div className="verified-table" key={table.title}><h4>{table.title}</h4><div><table><thead><tr>{table.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{table.rows.map((row, rowIndex) => <tr key={`${table.title}-${rowIndex}`}>{row.map((cell, cellIndex) => <td key={`${rowIndex}-${cellIndex}`}>{cell || "未披露"}</td>)}</tr>)}</tbody></table></div></div>
+                ))}
+              </article>
+            ))}
+          </div>
+        ) : <div className="verified-requirements-empty">当前公告没有可核验的结构化条款。请以原公告和已下载招标文件为准。</div>}
       </section>
     </>
   );

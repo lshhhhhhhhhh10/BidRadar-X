@@ -5,7 +5,6 @@ import { useMemo, useState } from "react";
 
 import styles from "./page.module.css";
 import {
-  SHANGHAI_PROPERTY_DEMO_ID,
   SHANGHAI_PROPERTY_DEMO_PROJECTS,
   SHANGHAI_PROPERTY_DEMO_QUERY,
   SHANGHAI_PROPERTY_DEMO_VERIFIED_AT,
@@ -37,7 +36,7 @@ const DEMO_RUNS: DemoScheduledRun[] = [
       "demo-ceb-jiangyang-cleaning",
       "demo-ceb-wangnibang-cleaning",
       "demo-ceb-vehicle-cleaning",
-      "demo-jianyu-wanan-cleaning",
+      "demo-wanan-cleaning",
     ],
   },
   {
@@ -102,7 +101,7 @@ export default function ShanghaiPropertyReportPreviewPage() {
           <p>选择一次运行，页面标出当次新增；下载文件保持正式、无高亮。</p>
         </div>
         <div className={styles.topActions}>
-          <Link href={`/projects?demo=${SHANGHAI_PROPERTY_DEMO_ID}`}>返回项目结果</Link>
+          <Link href="/reports">返回项目报告</Link>
           {downloadUrl ? (
             <a className={styles.primaryAction} href={downloadUrl}>下载本次增量 Word</a>
           ) : (

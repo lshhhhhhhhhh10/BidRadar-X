@@ -18,13 +18,18 @@ from tests.integration_support import FailingSource, isolated_source_set, source
 
 class RealWorkflowIntegrationTest(unittest.TestCase):
     def test_production_registry_contains_real_public_and_login_sources_only(self) -> None:
-        sources = build_production_sources()
+        with patch.dict(
+            "os.environ",
+            {"BIDRADAR_TIANYANCHA_TOKEN": "configured-for-registry-test"},
+        ):
+            sources = build_production_sources()
 
         self.assertGreaterEqual(len(sources), 2)
         self.assertTrue(any(item.metadata.get("requires_login") for item in sources))
         self.assertTrue(any(not item.metadata.get("requires_login") for item in sources))
         self.assertNotIn("example.local", repr(sources))
         self.assertNotIn("public-platform", {item.metadata["source_id"] for item in sources})
+        self.assertIn("tianyancha-bids", {item.metadata["source_id"] for item in sources})
 
     def test_failed_login_source_does_not_block_real_docx_report(self) -> None:
         adapters = isolated_source_set()
@@ -108,9 +113,11 @@ class RealWorkflowIntegrationTest(unittest.TestCase):
                 )
 
             self.assertEqual(state["status"], "failed")
-            self.assertIsNone(state["report"]["filename"])
-            self.assertIsNone(state["report"]["download_url"])
-            self.assertEqual(len(state["report"]["failed_sources"]), 2)
+            self.assertNotIn("report", state)
+            self.assertEqual(
+                len([item for item in state["selected_sources"] if item["collection_status"] == "failed"]),
+                2,
+            )
             self.assertEqual(list(Path(output_dir).glob("*.docx")), [])
 
 

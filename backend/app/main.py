@@ -10,6 +10,9 @@ from .api.tasks import router as tasks_router
 from .api.projects import router as projects_router
 from .api.reports import router as reports_router
 from .api.subscriptions import router as subscriptions_router
+from .api.sources import router as sources_router
+from .api.ai import router as ai_router
+from .api.attachments import router as attachments_router
 from .services.publisher import REPORT_DIR
 from .services.scheduler import LocalScheduler, SystemClock
 from .services.scheduler_worker import SchedulerWorker
@@ -58,6 +61,9 @@ app.include_router(tasks_router)
 app.include_router(projects_router)
 app.include_router(reports_router)
 app.include_router(subscriptions_router)
+app.include_router(sources_router)
+app.include_router(ai_router)
+app.include_router(attachments_router)
 
 
 @app.get("/")

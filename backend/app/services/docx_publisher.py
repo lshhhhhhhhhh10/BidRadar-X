@@ -8,7 +8,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 import re
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from docx import Document
@@ -48,6 +48,7 @@ _WINDOWS_RESERVED = {
     *(f"COM{number}" for number in range(1, 10)),
     *(f"LPT{number}" for number in range(1, 10)),
 }
+_CJK_FONT = "Hiragino Sans GB"
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class DocxPublisher:
         query: str,
         notices: Sequence[TenderNotice],
         report_scope: ReportScope = "full",
+        ai_report: dict[str, Any] | None = None,
     ) -> Path:
         """Generate, exclusively write, reopen, and validate one DOCX report."""
 
@@ -92,7 +94,13 @@ class DocxPublisher:
         filename = build_report_filename(query, generated_at)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         report_path = self.output_dir / filename
-        document = _build_document(query, notice_list, report_scope, generated_at)
+        document = _build_document(
+            query,
+            notice_list,
+            report_scope,
+            generated_at,
+            ai_report=ai_report,
+        )
         buffer = BytesIO()
         document.save(buffer)
 
@@ -201,6 +209,7 @@ def _build_document(
     notices: list[TenderNotice],
     report_scope: ReportScope,
     generated_at: datetime,
+    ai_report: dict[str, Any] | None = None,
 ) -> DocumentType:
     document = Document()
     _configure_document(document)
@@ -212,10 +221,40 @@ def _build_document(
 
     ordered = sorted(notices, key=lambda item: (item.published_at, item.title), reverse=True)
     _add_overview(document, ordered)
+    if ai_report and ai_report.get("status") == "generated":
+        _add_ai_overview(document, ai_report)
+    narratives = {
+        item["notice_id"]: item
+        for item in (ai_report or {}).get("notice_narratives", [])
+        if isinstance(item, dict) and item.get("notice_id")
+    }
     for index, notice in enumerate(ordered, start=1):
         document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
-        _add_project(document, index, notice)
+        _add_project(document, index, notice, narratives.get(notice.notice_id))
     return document
+
+
+def _add_ai_overview(document: DocumentType, ai_report: dict[str, Any]) -> None:
+    document.add_heading("AI 辅助研判", level=1)
+    note = document.add_paragraph("以下内容由模型基于本报告证据生成；原公告字段、链接和附件保持原样。")
+    _style_paragraph(note, 8.5, "6B7C8A", spacing_after=5)
+
+    summary = document.add_paragraph()
+    summary.add_run("执行摘要  ").bold = True
+    summary.add_run(str(ai_report.get("executive_summary", "")))
+    _style_paragraph(summary, 9.5, "263238", spacing_after=6)
+
+    findings = ai_report.get("key_findings", [])
+    if findings:
+        heading = document.add_paragraph("关键发现")
+        _style_paragraph(heading, 10, "315D7D", bold=True, spacing_after=3)
+        for item in findings:
+            paragraph = document.add_paragraph(style="List Bullet")
+            paragraph.add_run(str(item.get("text", "")))
+            evidence_ids = item.get("evidence_ids", [])
+            if evidence_ids:
+                paragraph.add_run(f"  [证据：{', '.join(evidence_ids)}]")
+            _style_paragraph(paragraph, 9, "263238", spacing_after=2)
 
 
 def _configure_document(document: DocumentType) -> None:
@@ -228,11 +267,11 @@ def _configure_document(document: DocumentType) -> None:
     section.footer_distance = Cm(0.7)
 
     normal = document.styles["Normal"]
-    normal.font.name = "Microsoft YaHei"
+    normal.font.name = _CJK_FONT
     normal.font.size = Pt(9.5)
     normal.font.color.rgb = RGBColor(38, 50, 56)
     normal._element.get_or_add_rPr().get_or_add_rFonts().set(
-        qn("w:eastAsia"), "Microsoft YaHei"
+        qn("w:eastAsia"), _CJK_FONT
     )
     normal.paragraph_format.space_after = Pt(3)
     normal.paragraph_format.line_spacing = 1.15
@@ -244,12 +283,12 @@ def _configure_document(document: DocumentType) -> None:
         ("Heading 3", 10, "315D7D"),
     ):
         style = document.styles[style_name]
-        style.font.name = "Microsoft YaHei"
+        style.font.name = _CJK_FONT
         style.font.size = Pt(size)
         style.font.bold = True
         style.font.color.rgb = RGBColor.from_string(color)
         style._element.get_or_add_rPr().get_or_add_rFonts().set(
-            qn("w:eastAsia"), "Microsoft YaHei"
+            qn("w:eastAsia"), _CJK_FONT
         )
         style.paragraph_format.keep_with_next = True
         style.paragraph_format.space_before = Pt(8 if style_name != "Title" else 0)
@@ -343,7 +382,12 @@ def _add_overview(document: DocumentType, notices: list[TenderNotice]) -> None:
                 _shade_cell(cell, "F4F7F9")
 
 
-def _add_project(document: DocumentType, index: int, notice: TenderNotice) -> None:
+def _add_project(
+    document: DocumentType,
+    index: int,
+    notice: TenderNotice,
+    ai_narrative: dict[str, Any] | None = None,
+) -> None:
     marker = document.add_paragraph(f"PROJECT {index:02d}")
     _style_paragraph(marker, 8.5, "4C7899", bold=True, spacing_after=2)
     document.add_heading(notice.title, level=1)
@@ -353,6 +397,24 @@ def _add_project(document: DocumentType, index: int, notice: TenderNotice) -> No
     summary.add_run("核心内容  ").bold = True
     summary.add_run(notice.core_content)
     _style_paragraph(summary, 9.5, "263238", spacing_before=5, spacing_after=6)
+
+    if ai_narrative:
+        heading = document.add_paragraph("AI 辅助摘要")
+        _style_paragraph(heading, 10, "315D7D", bold=True, spacing_before=5, spacing_after=2)
+        narrative = document.add_paragraph(str(ai_narrative.get("summary", "")))
+        _style_paragraph(narrative, 9, "263238", spacing_after=3)
+        for label, key in (("风险提示", "risk_points"), ("建议动作", "next_actions")):
+            values = ai_narrative.get(key, [])
+            if not values:
+                continue
+            paragraph = document.add_paragraph()
+            paragraph.add_run(f"{label}：").bold = True
+            paragraph.add_run("；".join(str(item) for item in values))
+            _style_paragraph(paragraph, 8.5, "4C5963", spacing_after=2)
+        evidence_ids = ai_narrative.get("evidence_ids", [])
+        if evidence_ids:
+            evidence_line = document.add_paragraph(f"关联证据：{', '.join(evidence_ids)}")
+            _style_paragraph(evidence_line, 8, "6B7C8A", spacing_after=5)
 
     sections = sorted(
         notice.requirement_sections,
@@ -567,12 +629,12 @@ def _style_paragraph(
     paragraph.paragraph_format.space_before = Pt(spacing_before)
     paragraph.paragraph_format.space_after = Pt(spacing_after)
     for run in paragraph.runs:
-        run.font.name = "Microsoft YaHei"
+        run.font.name = _CJK_FONT
         run.font.size = Pt(size)
         run.font.bold = bold or run.bold
         run.font.color.rgb = RGBColor.from_string(color)
         run._element.get_or_add_rPr().get_or_add_rFonts().set(
-            qn("w:eastAsia"), "Microsoft YaHei"
+            qn("w:eastAsia"), _CJK_FONT
         )
 
 

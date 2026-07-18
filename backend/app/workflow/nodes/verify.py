@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...ai.service import AICoordinator, append_audit
 from .common import step
 
 
@@ -12,11 +13,39 @@ def verify_facts(state: dict[str, Any]) -> dict[str, Any]:
     for item in state["analysis"]:
         if not item["evidence_ids"]:
             issues.append(f"{item['project_id']} 缺少证据")
+    audit = None
+    ai_used = False
+    if state["analysis"]:
+        coordinator = AICoordinator()
+        verification, audit = coordinator.verify_facts(
+            {
+                "query": state["query"],
+                "analysis": state["analysis"],
+                "evidence": [
+                    {**item, "content": item["content"][:1800]}
+                    for item in state["evidence"][:60]
+                ],
+            }
+        )
+        ai_used = verification is not None
+        if verification is not None:
+            known_projects = {item["project_id"] for item in state["analysis"]}
+            for project in verification.projects:
+                if (
+                    project.project_id in known_projects
+                    and not project.supported
+                    and project.confidence >= 0.80
+                    and project.unsupported_claims
+                ):
+                    issues.append(
+                        f"{project.project_id} AI 核验未通过：{'; '.join(project.unsupported_claims[:3])}"
+                    )
     passed = not issues
     retry_count = state.get("retry_count", 0) + (0 if passed else 1)
     return {
         "quality_passed": passed,
         "quality_issues": issues,
         "retry_count": retry_count,
-        "steps": step(state, "事实核验 Agent", "质量检查通过。" if passed else "质量不足，将触发一次检索回路。", len(state["analysis"]), len(state["analysis"]) - len(issues), "completed" if passed else "warning"),
+        **({"ai_audit": append_audit(state, audit)} if audit is not None else {}),
+        "steps": step(state, "事实核验 Agent", ("规则与 AI 双重核验通过。" if ai_used else "规则核验通过。") if passed else "质量不足，将自动触发一次检索回路。", len(state["analysis"]), max(0, len(state["analysis"]) - len(issues)), "completed" if passed else "warning"),
     }

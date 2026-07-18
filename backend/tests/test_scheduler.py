@@ -12,6 +12,8 @@ from uuid import uuid4
 from app.services.scheduler import LocalScheduler, SubscriptionService
 from app.services.scheduler_worker import SchedulerWorker
 from app.services.task_runner import TaskRunner
+from app.api.tasks import _ensure_recurring_subscription
+from app.schemas.task import TaskRunRequest
 from app.services import publisher as publisher_module
 from app.services.publisher import Publisher
 from app.storage import database as database_module
@@ -293,6 +295,55 @@ class PersistentClaimTest(unittest.TestCase):
         self.clock.advance_to(datetime(2026, 7, 15, 1, 0, tzinfo=timezone.utc))
         self.assertTrue(worker.run_once_sync())
 
+    def test_subscription_create_is_idempotent_for_a_live_query_task_id(self) -> None:
+        repository = Repository()
+        service = SubscriptionService(
+            repository=repository,
+            scheduler=LocalScheduler(clock=self.clock),
+            clock=self.clock,
+        )
+        task_id = str(uuid4())
+        values = {
+            "task_id": task_id,
+            "query": "查询服务器采购公告",
+            "frequency": "daily",
+            "timezone_name": "Asia/Shanghai",
+            "local_time": "09:00",
+            "weekly_day": None,
+            "run_at": None,
+            "max_retries": 3,
+            "retry_backoff_seconds": 30,
+        }
+
+        first = service.create(**values)
+        second = service.create(**values)
+
+        self.assertEqual(first["task_id"], task_id)
+        self.assertEqual(second["task_id"], task_id)
+        self.assertEqual(
+            len([item for item in repository.list_subscriptions() if item["task_id"] == task_id]),
+            1,
+        )
+
+    def test_live_daily_query_automatically_creates_persistent_subscription(self) -> None:
+        repository = Repository()
+        task_id = str(uuid4())
+
+        subscription = _ensure_recurring_subscription(
+            repository=repository,
+            task_id=task_id,
+            request=TaskRunRequest(
+                query="每天早上9点查询服务器采购公告",
+                frequency="daily",
+            ),
+        )
+
+        self.assertIsNotNone(subscription)
+        self.assertEqual(subscription["task_id"], task_id)
+        self.assertEqual(subscription["local_time"], "09:00")
+        self.assertEqual(subscription["query"], "查询服务器采购公告")
+        self.assertIsNotNone(repository.get_subscription(task_id))
+
     def test_workflow_failure_retries_with_backoff_then_succeeds(self) -> None:
         task_id = self.create_due_subscription()
         repository = Repository()
@@ -424,7 +475,7 @@ class ScheduledWorkflowIntegrationTest(unittest.TestCase):
         worker = self.worker()
         with (
             patch.object(source_select, "SOURCE_ADAPTERS", isolated_source_set()),
-            patch.object(Publisher, "_publish_delivery_report", side_effect=RuntimeError("docx failed")),
+            patch.object(Publisher, "_publish_delivery_reports", side_effect=RuntimeError("docx failed")),
         ):
             self.assertTrue(worker.run_once_sync())
 

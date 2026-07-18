@@ -1704,29 +1704,82 @@ class Repository:
         with connect() as connection:
             rows = connection.execute(
                 """
-                SELECT run_id, task_id, status, result_json, created_at
+                SELECT runs.run_id, runs.task_id, runs.status,
+                       runs.result_json, runs.created_at
                 FROM runs
-                ORDER BY created_at DESC, run_id DESC
+                LEFT JOIN hidden_report_runs hidden
+                  ON hidden.run_id = runs.run_id
+                WHERE hidden.run_id IS NULL
+                ORDER BY runs.created_at DESC, runs.run_id DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (max(limit * 8, limit),),
             ).fetchall()
         items: list[dict[str, Any]] = []
+        latest_by_identity: dict[str, datetime] = {}
         for row in rows:
             result = json.loads(row["result_json"])
+            query = str(result.get("query", ""))
+            frequency = str(result.get("frequency", "once"))
+            identity = query
+            created_at = datetime.fromisoformat(row["created_at"])
+            previous = latest_by_identity.get(identity) if identity else None
+            if previous is not None and abs((previous - created_at).total_seconds()) <= 5:
+                continue
+            if identity:
+                latest_by_identity[identity] = created_at
             items.append(
                 {
                     "run_id": row["run_id"],
                     "task_id": row["task_id"],
-                    "query": result.get("query", ""),
-                    "frequency": result.get("frequency", "once"),
+                    "query": query,
+                    "frequency": frequency,
                     "run_status": row["status"],
                     "created_at": row["created_at"],
                     "project_count": len(result.get("projects", [])),
                     "report": result.get("report"),
+                    "ai_report": result.get("ai_report") or {"status": "not_generated"},
                 }
             )
+            if len(items) >= limit:
+                break
         return items
+
+    def hide_report_run(self, run_id: str) -> bool:
+        """Hide a visible run and any same-query duplicates created seconds apart."""
+
+        with connect() as connection:
+            target = connection.execute(
+                "SELECT run_id, result_json, created_at FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if target is None:
+                return False
+            target_result = json.loads(target["result_json"])
+            target_identity = str(target_result.get("query", ""))
+            target_created_at = datetime.fromisoformat(target["created_at"])
+            duplicates = [run_id]
+            if target_identity:
+                for candidate in connection.execute(
+                    "SELECT run_id, result_json, created_at FROM runs"
+                ).fetchall():
+                    candidate_result = json.loads(candidate["result_json"])
+                    candidate_identity = str(candidate_result.get("query", ""))
+                    candidate_created_at = datetime.fromisoformat(candidate["created_at"])
+                    if (
+                        candidate_identity == target_identity
+                        and abs((candidate_created_at - target_created_at).total_seconds()) <= 5
+                    ):
+                        duplicates.append(candidate["run_id"])
+            connection.executemany(
+                """
+                INSERT INTO hidden_report_runs(run_id, hidden_at)
+                VALUES (?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET hidden_at = excluded.hidden_at
+                """,
+                [(duplicate_run_id, _now()) for duplicate_run_id in duplicates],
+            )
+        return True
 
     def save_project_profiles(self, run_id: str, profiles: list[dict[str, Any]]) -> None:
         with connect() as connection:
