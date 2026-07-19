@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import asyncio
 import unittest
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -228,8 +229,17 @@ class CCGPSourceTest(unittest.IsolatedAsyncioTestCase):
     async def test_collect_stops_on_a_security_or_rate_limit_page(
         self,
     ) -> None:
+        fallback_listing = """
+        <html><body><ul><li><a href="./202607/t20260718_10001.htm"
+        title="办公家具公开招标公告">办公家具</a>
+        发布时间：<em>2026-07-18 09:00</em> 地域：<em>北京</em></li></ul></body></html>
+        """
         transport = StubTransport(
-            {CCGPSource.SEARCH_URL: fixture("access_blocked.html")}
+            {
+                CCGPSource.SEARCH_URL: fixture("access_blocked.html"),
+                CCGPSource.FALLBACK_CHANNEL_URLS[0]: fallback_listing,
+                CCGPSource.FALLBACK_CHANNEL_URLS[1]: fallback_listing,
+            }
         )
         source = CCGPSource(transport=transport, min_interval=0, max_retries=2)
         task = TaskSpec(
@@ -240,14 +250,11 @@ class CCGPSourceTest(unittest.IsolatedAsyncioTestCase):
             keywords=["服务器"],
         )
 
-        with self.assertRaises(CCGPAccessBlockedError):
-            await source.collect(task, {"max_pages": 1})
+        notices = await source.collect(task, {"max_pages": 1})
 
-        self.assertEqual(
-            len(transport.calls),
-            1,
-            "security pages must not be bypassed or retried",
-        )
+        self.assertEqual(notices, [])
+        self.assertEqual(len(transport.calls), 3)
+        self.assertEqual(transport.calls[0]["url"], CCGPSource.SEARCH_URL)
 
     async def test_collect_retries_timeouts_with_backoff_and_identifies_itself(
         self,
@@ -440,6 +447,25 @@ class CCGPSourceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(notices, [])
         self.assertEqual(len(transport.calls), 2)
+
+
+class CCGPCrossLoopSafetyTest(unittest.TestCase):
+    def test_shared_adapter_can_run_on_successive_event_loops(self) -> None:
+        source = CCGPSource(
+            transport=StubTransport(
+                {CCGPSource.SEARCH_URL: fixture("search_results_empty.html")}
+            ),
+            min_interval=0,
+        )
+        task = TaskSpec(
+            task_id="task-ccgp-cross-loop",
+            query="服务器采购公告",
+            topic="服务器",
+            keywords=["服务器"],
+        )
+
+        self.assertEqual(asyncio.run(source.collect(task, {"max_pages": 1})), [])
+        self.assertEqual(asyncio.run(source.collect(task, {"max_pages": 1})), [])
 
 
 if __name__ == "__main__":

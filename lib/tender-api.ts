@@ -63,7 +63,7 @@ export type RunSummary = {
   task_id: string;
   run_id: string;
   query: string;
-  frequency: "once" | "daily" | "weekly";
+  frequency: "once" | "interval" | "daily" | "weekly";
   status: string;
   project_count: number;
 };
@@ -119,7 +119,7 @@ export type ReportHistoryItem = {
   task_id: string;
   query: string;
   display_title?: string;
-  frequency: "once" | "daily" | "weekly";
+  frequency: "once" | "interval" | "daily" | "weekly";
   run_status: string;
   created_at: string;
   project_count: number;
@@ -132,6 +132,8 @@ export type ReportHistoryItem = {
     status: "success" | "failed" | "not_attempted";
     record_count: number;
     requires_login: boolean;
+    attempt_count?: number;
+    failure_reason?: string | null;
   }>;
 };
 
@@ -155,6 +157,7 @@ export type LiveTaskStage = {
       relevant_count: number | null;
       requires_login: boolean;
       failure_reason?: string | null;
+      attempt_count?: number;
     }>;
     counts?: Array<{ label: string; value: number }>;
     quality_issues?: string[];
@@ -167,6 +170,8 @@ export type LiveTaskStage = {
     model?: string | null;
     latency_ms?: number | null;
     call_count: number;
+    failure_reason?: string | null;
+    provider_code?: string | null;
   };
 };
 
@@ -194,11 +199,45 @@ export type SpendBudget = {
 export type SubscriptionSummary = {
   task_id: string;
   query: string;
-  frequency: "once" | "daily" | "weekly";
+  frequency: "once" | "interval" | "daily" | "weekly";
+  interval_minutes?: number | null;
   timezone: string;
   local_time: string;
-  next_run_at: string;
+  weekly_day?: string | null;
+  next_run_at: string | null;
   status: "active" | "paused" | "completed" | "failed";
+  retry_count?: number;
+  max_retries?: number;
+  last_error?: string | null;
+  last_run_at?: string | null;
+};
+
+export type SubscriptionRunProject = {
+  project_id: string;
+  title: string;
+  source_name: string;
+  published_at?: string | null;
+  url: string;
+  summary: string;
+};
+
+export type SubscriptionRunSummary = {
+  run_id: string;
+  scheduled_for: string;
+  status: "running" | "succeeded" | "failed" | "lease_expired";
+  outcome: "running" | "new_content" | "no_change" | "failed";
+  retry_count: number;
+  started_at: string;
+  completed_at?: string | null;
+  error?: string | null;
+  project_count: number;
+  projects: SubscriptionRunProject[];
+  report_available: boolean;
+};
+
+export type SubscriptionDetail = {
+  subscription: SubscriptionSummary;
+  runs: SubscriptionRunSummary[];
 };
 
 export type RunTaskResponse = {
@@ -221,6 +260,34 @@ export type AIStatus = {
   fallback?: string;
   stages?: string[];
   calls?: Array<Record<string, unknown>>;
+  profile_count?: number;
+  candidate_count?: number;
+  failover_enabled?: boolean;
+  active_profile_id?: string | null;
+  profiles?: AIProfile[];
+};
+
+export type AIProviderPreset = {
+  id: string;
+  label: string;
+  default_base_url: string;
+  default_model: string;
+  protocol: string;
+};
+
+export type AIProfile = {
+  profile_id: string;
+  label: string;
+  provider: string;
+  base_url: string;
+  model: string;
+  fallback_model?: string | null;
+  priority: number;
+  enabled: boolean;
+  configured: boolean;
+  masked_key: string;
+  storage: "backend_process_memory";
+  created_at: string;
 };
 
 export type SourceCatalogItem = {
@@ -266,6 +333,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const message =
       typeof detail === "string"
         ? detail
+        : Array.isArray(detail) && typeof detail[0]?.msg === "string"
+          ? detail[0].msg.replace(/^Value error,\s*/, "")
         : typeof detail?.message === "string"
           ? detail.message
           : `本地后端请求失败（${response.status}）`;
@@ -277,23 +346,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function runTask(
   query: string,
-  frequency: "once" | "daily" | "weekly",
+  frequency: "once" | "interval" | "daily" | "weekly",
   overrides?: { subject?: string; region?: string },
+  intervalMinutes?: number,
 ) {
   return request<RunTaskResponse>("/tasks/run", {
     method: "POST",
-    body: JSON.stringify({ query, frequency, ...overrides }),
+    body: JSON.stringify({ query, frequency, interval_minutes: intervalMinutes, ...overrides }),
   });
 }
 
 export async function startLiveTask(
   query: string,
-  frequency: "once" | "daily" | "weekly",
+  schedule: { frequency: "once" | "interval" | "daily" | "weekly"; interval_minutes?: number },
   overrides?: { subject?: string; region?: string },
 ) {
   return request<LiveTask>("/tasks/live", {
     method: "POST",
-    body: JSON.stringify({ query, frequency, ...overrides }),
+    body: JSON.stringify({ query, ...schedule, ...overrides }),
   });
 }
 
@@ -353,6 +423,28 @@ export async function listSubscriptions() {
   return request<{ items: SubscriptionSummary[] }>("/subscriptions");
 }
 
+export async function getSubscriptionDetail(taskId: string) {
+  return request<SubscriptionDetail>(`/subscriptions/${encodeURIComponent(taskId)}/detail`);
+}
+
+export async function pauseSubscription(taskId: string) {
+  return request<SubscriptionSummary>(`/subscriptions/${encodeURIComponent(taskId)}/pause`, {
+    method: "POST",
+  });
+}
+
+export async function resumeSubscription(taskId: string) {
+  return request<SubscriptionSummary>(`/subscriptions/${encodeURIComponent(taskId)}/resume`, {
+    method: "POST",
+  });
+}
+
+export async function deleteSubscription(taskId: string) {
+  return request<void>(`/subscriptions/${encodeURIComponent(taskId)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function revealLocalAttachment(revealUrl: string) {
   const path = revealUrl.startsWith("/api/") ? revealUrl.slice(4) : revealUrl;
   return request<{ revealed: boolean; filename: string; folder: string }>(path, {
@@ -379,6 +471,46 @@ export async function getAIStatus() {
   return request<AIStatus>("/ai/status");
 }
 
+export async function listAIProfiles() {
+  return request<{
+    items: AIProfile[];
+    providers: AIProviderPreset[];
+    storage: "backend_process_memory";
+  }>("/ai/profiles");
+}
+
+export async function createAIProfile(payload: {
+  label: string;
+  provider: string;
+  api_key: string;
+  model: string;
+  base_url?: string;
+  fallback_model?: string;
+  priority?: number;
+  enabled?: boolean;
+}) {
+  return request<{ profile: AIProfile; ai: AIStatus }>("/ai/profiles", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAIProfile(profileId: string, enabled: boolean, priority: number) {
+  return request<{ profile: AIProfile; ai: AIStatus }>(
+    `/ai/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ enabled, priority }),
+    },
+  );
+}
+
+export async function deleteAIProfile(profileId: string) {
+  return request<void>(`/ai/profiles/${encodeURIComponent(profileId)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function connectSourceCredential(sourceId: string, credential: string) {
   return request<{
     source_id: string;
@@ -403,8 +535,26 @@ export function resolveApiUrl(path: string): string {
   return new URL(path, `${API_BASE}/`).toString();
 }
 
-export function frequencyToApi(value: string): "once" | "daily" | "weekly" {
-  if (value.includes("每日") || value.includes("每天")) return "daily";
-  if (value.includes("每周")) return "weekly";
-  return "once";
+export function frequencyToApi(value: string): {
+  frequency: "once" | "interval" | "daily" | "weekly";
+  interval_minutes?: number;
+} {
+  const interval = value.match(/(?:每隔|每)\s*(\d{1,4}|[一二两三四五六七八九十]{1,4})\s*(?:分钟|分)/);
+  if (interval) {
+    return { frequency: "interval", interval_minutes: parseSmallChineseNumber(interval[1]) };
+  }
+  if (value.includes("每日") || value.includes("每天")) return { frequency: "daily" };
+  if (value.includes("每周")) return { frequency: "weekly" };
+  return { frequency: "once" };
+}
+
+function parseSmallChineseNumber(value: string): number {
+  if (/^\d+$/.test(value)) return Number(value);
+  const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (value === "十") return 10;
+  if (value.includes("十")) {
+    const [left, right] = value.split("十");
+    return (digits[left] ?? 1) * 10 + (digits[right] ?? 0);
+  }
+  return digits[value] ?? 0;
 }

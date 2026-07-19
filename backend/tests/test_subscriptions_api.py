@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.storage import database as database_module
+from app.storage.repository import Repository
 
 
 class SubscriptionsApiTest(unittest.TestCase):
@@ -124,6 +125,88 @@ class SubscriptionsApiTest(unittest.TestCase):
         self.assertEqual(body["parsed"]["local_time"], "15:00")
         self.assertEqual(body["subscription"]["weekly_day"], "monday")
 
+    def test_natural_language_query_creates_a_three_minute_subscription(self) -> None:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/subscriptions/from-query",
+                json={"query": "每隔三分钟查询全国人工智能采购信息"},
+            )
+
+        self.assertEqual(response.status_code, 201, response.text)
+        body = response.json()
+        self.assertEqual(body["parsed"]["frequency"], "interval")
+        self.assertEqual(body["parsed"]["interval_minutes"], 3)
+        self.assertEqual(body["parsed"]["search_query"], "查询全国人工智能采购信息")
+        self.assertEqual(body["subscription"]["interval_minutes"], 3)
+        next_run = datetime.fromisoformat(body["subscription"]["next_run_at"])
+        created_at = datetime.fromisoformat(body["subscription"]["created_at"])
+        self.assertAlmostEqual((next_run - created_at).total_seconds(), 180, delta=2)
+
+    def test_subscription_detail_lists_new_and_empty_triggers(self) -> None:
+        with TestClient(app) as client:
+            created = client.post(
+                "/api/subscriptions/from-query",
+                json={"query": "每隔三分钟查询全国人工智能采购信息"},
+            ).json()["subscription"]
+            task_id = created["task_id"]
+            earlier = datetime.now(timezone.utc) - timedelta(minutes=6)
+            later = datetime.now(timezone.utc) - timedelta(minutes=3)
+            with database_module.connect() as connection:
+                connection.executemany(
+                    """
+                    INSERT INTO schedule_runs(
+                        run_id, task_id, scheduled_for, worker_id, status,
+                        retry_count, started_at, completed_at, error
+                    ) VALUES (?, ?, ?, 'test-worker', 'succeeded', 0, ?, ?, NULL)
+                    """,
+                    [
+                        ("new-run", task_id, earlier.isoformat(), earlier.isoformat(), earlier.isoformat()),
+                        ("empty-run", task_id, later.isoformat(), later.isoformat(), later.isoformat()),
+                    ],
+                )
+            Repository().save_run(
+                {
+                    "task_id": task_id,
+                    "run_id": "new-run",
+                    "query": created["query"],
+                    "frequency": "interval",
+                    "status": "completed",
+                    "changes": [{"project_id": "project-1", "type": "new_project"}],
+                    "projects": [
+                        {
+                            "project_id": "project-1",
+                            "documents": [
+                                {
+                                    "notice": {
+                                        "title": "人工智能算力平台采购项目",
+                                        "published_at": "2026-07-18T09:00:00+08:00",
+                                        "core_content": "采购人工智能算力服务器。",
+                                        "source": {
+                                            "source_name": "中国政府采购网",
+                                            "source_url": "https://example.test/project-1",
+                                            "authority": 1,
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    ],
+                    "report": {"status": "generated"},
+                }
+            )
+
+            response = client.get(f"/api/subscriptions/{task_id}/detail")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["subscription"]["task_id"], task_id)
+        self.assertEqual([item["run_id"] for item in body["runs"]], ["empty-run", "new-run"])
+        self.assertEqual(body["runs"][0]["outcome"], "no_change")
+        self.assertEqual(body["runs"][0]["project_count"], 0)
+        self.assertEqual(body["runs"][1]["outcome"], "new_content")
+        self.assertEqual(body["runs"][1]["projects"][0]["title"], "人工智能算力平台采购项目")
+        self.assertTrue(body["runs"][1]["report_available"])
+
     def test_natural_language_once_subscription_survives_service_restart(self) -> None:
         local_future = datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(days=2)
         query = f"{local_future:%Y-%m-%d} 上午9点查询安徽服务器采购"
@@ -158,6 +241,7 @@ class SubscriptionsApiTest(unittest.TestCase):
             "每周一周二9点查询服务器项目": "schedule_ambiguous",
             "2000-01-01 上午9点查询服务器项目": "schedule_in_past",
             "每天上午9点": "empty_search_query",
+            "每隔2分钟查询服务器项目": "interval_too_short",
         }
 
         with TestClient(app) as client:

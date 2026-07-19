@@ -30,6 +30,19 @@ const FALLBACK_INTERFACES: SourceCatalogItem[] = [
     detail: "费用由当前使用者承担，按实际调用次数从其开放平台账户扣除。",
     collection_mode: "接口 1063 · 约 ¥0.2/次",
   },
+  {
+    id: "sam-gov",
+    name: "SAM.gov Contract Opportunities",
+    category: "overseas",
+    category_label: "海外采购数据",
+    url: "https://sam.gov/content/opportunities",
+    host: "sam.gov",
+    requires_auth: true,
+    status: "needs_auth",
+    status_label: "等待用户 API Key",
+    detail: "注册用户在 Account Details 生成个人 API Key；密钥只交给本地后端使用。",
+    collection_mode: "Opportunities API v2",
+  },
 ];
 
 export default function InterfacesPage() {
@@ -46,7 +59,7 @@ export default function InterfacesPage() {
   useEffect(() => {
     listSourceCatalog()
       .then(({ items: sources }) => {
-        const managed = sources.filter((source) => source.id === "tianyancha-bids");
+        const managed = sources.filter((source) => ["tianyancha-bids", "sam-gov"].includes(source.id));
         if (managed.length > 0) setItems(managed);
       })
       .catch(() => undefined);
@@ -155,7 +168,7 @@ export default function InterfacesPage() {
           <div className={`ai-readiness-state ${aiStatus?.enabled ? "is-ready" : "is-waiting"}`}>
             <i aria-hidden="true" />
             <strong>{aiStatus?.enabled ? "已自动启用" : "等待后端密钥"}</strong>
-            <small>{aiStatus ? `${aiStatus.provider} · ${aiStatus.model}` : "智谱模型由后端配置"}</small>
+            <small>{aiStatus ? `${aiStatus.provider} · ${aiStatus.model}` : "AI 模型由后端配置"}</small>
           </div>
         </article>
 
@@ -253,6 +266,7 @@ export default function InterfacesPage() {
           </section>
         </div>
       )}
+
     </AppShell>
   );
 }

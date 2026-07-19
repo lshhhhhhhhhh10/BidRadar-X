@@ -61,7 +61,26 @@ class CancelOnLeaseLossRunner:
         return {"status": "completed"}
 
 
+class BrokenExternalDelivery:
+    def flush_due(self) -> dict:
+        return {"status": "idle", "delivered": 0}
+
+    def prepare_events(self, **_values) -> list[dict]:
+        raise RuntimeError("Feishu configuration is invalid")
+
+
 class ScheduleCalculationTest(unittest.TestCase):
+    def test_interval_schedule_runs_three_minutes_after_the_reference(self) -> None:
+        clock = FakeClock(datetime(2026, 7, 14, 0, 30, tzinfo=timezone.utc))
+
+        next_run = LocalScheduler(clock=clock).next_run_at(
+            frequency="interval",
+            interval_minutes=3,
+            timezone_name="Asia/Shanghai",
+        )
+
+        self.assertEqual(next_run, datetime(2026, 7, 14, 0, 33, tzinfo=timezone.utc))
+
     def test_asia_shanghai_daily_nine_uses_the_next_local_occurrence(self) -> None:
         clock = FakeClock(datetime(2026, 7, 14, 0, 30, tzinfo=timezone.utc))
         scheduler = LocalScheduler(clock=clock)
@@ -344,6 +363,25 @@ class PersistentClaimTest(unittest.TestCase):
         self.assertEqual(subscription["query"], "查询服务器采购公告")
         self.assertIsNotNone(repository.get_subscription(task_id))
 
+    def test_live_interval_query_automatically_creates_persistent_subscription(self) -> None:
+        repository = Repository()
+        task_id = str(uuid4())
+
+        subscription = _ensure_recurring_subscription(
+            repository=repository,
+            task_id=task_id,
+            request=TaskRunRequest(
+                query="每隔三分钟查询全国人工智能采购信息",
+                frequency="interval",
+                interval_minutes=3,
+            ),
+        )
+
+        self.assertIsNotNone(subscription)
+        self.assertEqual(subscription["frequency"], "interval")
+        self.assertEqual(subscription["interval_minutes"], 3)
+        self.assertEqual(subscription["query"], "查询全国人工智能采购信息")
+
     def test_workflow_failure_retries_with_backoff_then_succeeds(self) -> None:
         task_id = self.create_due_subscription()
         repository = Repository()
@@ -373,6 +411,26 @@ class PersistentClaimTest(unittest.TestCase):
             [item["status"] for item in repository.list_schedule_runs(task_id)],
             ["failed", "succeeded"],
         )
+
+    def test_external_delivery_preparation_failure_does_not_replay_the_crawl(self) -> None:
+        task_id = self.create_due_subscription()
+        repository = Repository()
+        runner = RecordingTaskRunner()
+        worker = SchedulerWorker(
+            repository=repository,
+            task_runner=runner,
+            scheduler=LocalScheduler(clock=self.clock),
+            clock=self.clock,
+            worker_id="worker-a",
+            external_delivery=BrokenExternalDelivery(),
+        )
+
+        self.assertTrue(worker.run_once_sync())
+
+        restored = repository.get_subscription(task_id)
+        self.assertEqual(restored["retry_count"], 0)
+        self.assertEqual(repository.list_schedule_runs(task_id)[0]["status"], "succeeded")
+        self.assertEqual(len(runner.calls), 1)
 
     def test_retry_limit_marks_a_permanently_failing_task_failed(self) -> None:
         task_id = str(uuid4())

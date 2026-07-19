@@ -13,6 +13,7 @@ from ..services.task_runner import TaskRunner
 from ..services.live_progress import build_live_progress
 from ..services.schedule_intent import ScheduleIntentError, ScheduleIntentParser
 from ..services.scheduler import LocalScheduler, SubscriptionService, SystemClock
+from ..services.source_failures import source_failure_reason
 from ..storage.repository import Repository
 from ..workflow.graph import WORKFLOW_DEFINITION
 from ..ai import AICoordinator
@@ -45,6 +46,7 @@ async def run_task(request: TaskRunRequest) -> dict:
         task_id=task_id,
         query=request.query,
         frequency=request.frequency,
+        interval_minutes=request.interval_minutes,
         requested_subject=request.subject,
         requested_region=request.region,
     )
@@ -53,7 +55,7 @@ async def run_task(request: TaskRunRequest) -> dict:
             status_code=502,
             detail={
                 "code": "task_failed",
-                "message": "任务执行失败，请稍后重试或在报告历史中查看状态。",
+                "message": _workflow_failure_message(state),
             },
         )
     Repository().save_project_profiles(
@@ -92,7 +94,13 @@ async def start_live_task(request: TaskRunRequest) -> dict:
         "job_id": job_id,
         "run_id": run_id,
         "task_id": task_id,
-        "state": {"run_id": run_id, "task_id": task_id, "query": request.query, "frequency": request.frequency},
+        "state": {
+            "run_id": run_id,
+            "task_id": task_id,
+            "query": request.query,
+            "frequency": request.frequency,
+            "interval_minutes": request.interval_minutes,
+        },
         "lifecycle": "running",
         "error_message": None,
         "pause_event": Event(),
@@ -175,6 +183,7 @@ def _task_id(request: TaskRunRequest) -> str:
                 (
                     request.query,
                     request.frequency,
+                    str(request.interval_minutes or ""),
                     request.subject or "",
                     request.region or "",
                 )
@@ -197,6 +206,7 @@ async def _execute_live_task(job: dict, request: TaskRunRequest) -> None:
                 run_id=job["run_id"],
                 query=request.query,
                 frequency=request.frequency,
+                interval_minutes=request.interval_minutes,
                 requested_subject=request.subject,
                 requested_region=request.region,
                 progress_callback=update,
@@ -227,9 +237,12 @@ async def _execute_live_task(job: dict, request: TaskRunRequest) -> None:
     except LiveTaskPaused:
         job["lifecycle"] = "paused"
         job["error_message"] = "任务已暂停，后续步骤未执行，也没有生成或跳转到项目报告。"
-    except Exception:
+    except Exception as error:
         job["lifecycle"] = "failed"
-        job["error_message"] = "检索链路执行失败，请检查信息源或 AI 配置后重试。"
+        job["error_message"] = (
+            "检索链路执行异常，已终止且未写入项目报告："
+            f"{source_failure_reason({'error_type': type(error).__name__, 'error': str(error)})}"
+        )
     finally:
         job["updated_at"] = datetime.now(timezone.utc)
 
@@ -245,7 +258,11 @@ def _public_live_job(job: dict) -> dict:
         **progress,
         "subscription": job.get("subscription"),
         "updated_at": job["updated_at"].isoformat(),
-        "redirect_url": f"/reports?run_id={job['run_id']}" if job["lifecycle"] in {"completed", "empty"} else None,
+        "redirect_url": (
+            f"/reports?run_id={job['run_id']}"
+            if job["lifecycle"] == "completed" and progress["project_count"] > 0
+            else None
+        ),
     }
 
 
@@ -258,15 +275,7 @@ def _workflow_failure_message(state: dict) -> str:
     if failed_sources:
         reasons: list[str] = []
         for item in failed_sources[:4]:
-            error_type = str(item.get("error_type") or "")
-            if "Budget" in error_type:
-                reason = "今日预算上限已触发，付费请求未发送"
-            elif "Authentication" in error_type:
-                reason = "授权缺失或已失效"
-            elif "Timeout" in error_type:
-                reason = "访问超时"
-            else:
-                reason = "来源暂时不可用"
+            reason = item.get("failure_reason") or source_failure_reason(item)
             reasons.append(f"{item.get('name') or item.get('source_id')}：{reason}")
         return "信息源采集失败，链路已停止。" + "；".join(reasons)
     issues = [str(item) for item in state.get("quality_issues", []) if item]
@@ -281,12 +290,13 @@ def _ensure_recurring_subscription(
     task_id: str,
     request: TaskRunRequest,
 ) -> dict | None:
-    if request.frequency not in {"daily", "weekly"}:
+    if request.frequency not in {"interval", "daily", "weekly"}:
         return None
     clock = SystemClock()
     query = request.query
     local_time = "09:00"
     weekly_day = "monday" if request.frequency == "weekly" else None
+    interval_minutes = request.interval_minutes
     try:
         intent = ScheduleIntentParser().parse(
             request.query,
@@ -297,6 +307,7 @@ def _ensure_recurring_subscription(
             query = intent.search_query
             local_time = intent.local_time
             weekly_day = intent.weekly_day
+            interval_minutes = intent.interval_minutes
     except ScheduleIntentError:
         # A cadence without an explicit clock still becomes reliable: daily
         # defaults to 09:00, weekly defaults to Monday 09:00 (Shanghai time).
@@ -311,6 +322,7 @@ def _ensure_recurring_subscription(
         task_id=task_id,
         query=query,
         frequency=request.frequency,
+        interval_minutes=interval_minutes,
         timezone_name="Asia/Shanghai",
         local_time=local_time,
         weekly_day=weekly_day,

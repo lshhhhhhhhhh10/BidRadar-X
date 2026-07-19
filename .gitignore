@@ -55,3 +55,13 @@ __pycache__/
 /.local-data/
 /.runtime-data-live/
 /.codex/dev-logs/
+
+# demo deliverables: keep the final video/cover/subtitles/script, ignore render intermediates
+/output/demo/assets/
+/output/demo/audio/
+/output/demo/segments/
+/output/demo/slides/
+/output/demo/*-raw.mp4
+/output/demo/segments.txt
+/output/demo/qa-contact-sheet.png
+/output/demo/program-running.png

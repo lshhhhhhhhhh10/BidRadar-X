@@ -586,6 +586,7 @@ class Repository:
         task_id: str,
         query: str,
         frequency: str,
+        interval_minutes: int | None = None,
         timezone_name: str,
         local_time: str,
         weekly_day: str | None,
@@ -600,15 +601,16 @@ class Repository:
             connection.execute(
                 """
                 INSERT INTO subscriptions(
-                    task_id, query, frequency, timezone, local_time, weekly_day,
+                    task_id, query, frequency, interval_minutes, timezone, local_time, weekly_day,
                     run_at, next_run_at, status, retry_count, max_retries,
                     retry_backoff_seconds, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
                     query,
                     frequency,
+                    interval_minutes,
                     timezone_name,
                     local_time,
                     weekly_day,
@@ -830,6 +832,7 @@ class Repository:
         worker_id: str,
         now: datetime,
         next_run_at: datetime | None,
+        external_events: list[dict[str, Any]] | None = None,
     ) -> bool:
         now_text = _utc_timestamp(now)
         with connect() as connection:
@@ -869,7 +872,178 @@ class Repository:
                 """,
                 (now_text, run_id, task_id),
             )
+            for event in external_events or []:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO external_delivery_outbox(
+                        event_id, provider, idempotency_key, task_id, run_id,
+                        payload_json, status, attempts, max_attempts,
+                        next_attempt_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)
+                    """,
+                    (
+                        event["event_id"],
+                        event["provider"],
+                        event["idempotency_key"],
+                        task_id,
+                        run_id,
+                        _canonical_json(event["payload"]),
+                        int(event.get("max_attempts", 10)),
+                        now_text,
+                        now_text,
+                        now_text,
+                    ),
+                )
         return True
+
+    def claim_external_deliveries(
+        self,
+        *,
+        provider: str,
+        worker_id: str,
+        now: datetime,
+        lease_duration: timedelta,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Atomically claim due outbox rows, recovering abandoned send leases."""
+
+        now_text = _utc_timestamp(now)
+        lease_text = _utc_timestamp(now + lease_duration)
+        with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT * FROM external_delivery_outbox
+                WHERE provider = ?
+                  AND (
+                    (status = 'pending' AND next_attempt_at <= ?)
+                    OR (status = 'sending' AND lease_expires_at <= ?)
+                  )
+                ORDER BY created_at, event_id
+                LIMIT ?
+                """,
+                (provider, now_text, now_text, max(1, min(limit, 100))),
+            ).fetchall()
+            claimed: list[dict[str, Any]] = []
+            for row in rows:
+                updated = connection.execute(
+                    """
+                    UPDATE external_delivery_outbox
+                    SET status = 'sending', lease_owner = ?, lease_expires_at = ?,
+                        attempts = attempts + 1, updated_at = ?
+                    WHERE event_id = ?
+                      AND (
+                        (status = 'pending' AND next_attempt_at <= ?)
+                        OR (status = 'sending' AND lease_expires_at <= ?)
+                      )
+                    """,
+                    (
+                        worker_id,
+                        lease_text,
+                        now_text,
+                        row["event_id"],
+                        now_text,
+                        now_text,
+                    ),
+                ).rowcount
+                if updated != 1:
+                    continue
+                item = dict(row)
+                item["status"] = "sending"
+                item["attempts"] = int(row["attempts"]) + 1
+                item["lease_owner"] = worker_id
+                item["lease_expires_at"] = lease_text
+                item["payload"] = json.loads(item.pop("payload_json"))
+                claimed.append(item)
+        return claimed
+
+    def mark_external_deliveries_delivered(
+        self,
+        *,
+        event_ids: list[str],
+        worker_id: str,
+        now: datetime,
+        remote_record_ids: list[str] | None = None,
+    ) -> None:
+        now_text = _utc_timestamp(now)
+        remote_ids = remote_record_ids or []
+        with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for index, event_id in enumerate(event_ids):
+                remote_id = remote_ids[index] if index < len(remote_ids) else None
+                connection.execute(
+                    """
+                    UPDATE external_delivery_outbox
+                    SET status = 'delivered', remote_record_id = ?, last_error = NULL,
+                        lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+                    WHERE event_id = ? AND status = 'sending' AND lease_owner = ?
+                    """,
+                    (remote_id, now_text, event_id, worker_id),
+                )
+
+    def mark_external_deliveries_retry(
+        self,
+        *,
+        event_ids: list[str],
+        worker_id: str,
+        now: datetime,
+        error: str,
+    ) -> None:
+        now_text = _utc_timestamp(now)
+        with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for event_id in event_ids:
+                row = connection.execute(
+                    """
+                    SELECT attempts, max_attempts FROM external_delivery_outbox
+                    WHERE event_id = ? AND status = 'sending' AND lease_owner = ?
+                    """,
+                    (event_id, worker_id),
+                ).fetchone()
+                if row is None:
+                    continue
+                attempts = int(row["attempts"])
+                failed = attempts >= int(row["max_attempts"])
+                delay_seconds = min(3600, 30 * (2 ** max(0, attempts - 1)))
+                next_attempt = _utc_timestamp(now + timedelta(seconds=delay_seconds))
+                connection.execute(
+                    """
+                    UPDATE external_delivery_outbox
+                    SET status = ?, next_attempt_at = ?, last_error = ?,
+                        lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+                    WHERE event_id = ? AND lease_owner = ?
+                    """,
+                    (
+                        "failed" if failed else "pending",
+                        next_attempt,
+                        error[:2000],
+                        now_text,
+                        event_id,
+                        worker_id,
+                    ),
+                )
+
+    def list_external_deliveries(
+        self,
+        *,
+        provider: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM external_delivery_outbox"
+        values: tuple[Any, ...] = ()
+        if provider:
+            query += " WHERE provider = ?"
+            values = (provider,)
+        query += " ORDER BY created_at DESC, event_id DESC LIMIT ?"
+        values += (max(1, min(limit, 500)),)
+        with connect() as connection:
+            rows = connection.execute(query, values).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            result.append(item)
+        return result
 
     def fail_schedule_run(
         self,
@@ -1719,6 +1893,18 @@ class Repository:
         latest_by_identity: dict[str, datetime] = {}
         for row in rows:
             result = json.loads(row["result_json"])
+            projects = result.get("projects", [])
+            # Also hide legacy empty attempts that were persisted by older
+            # versions before empty-run storage was disabled.
+            changes = result.get("changes", [])
+            if (
+                row["status"] != "completed"
+                or not isinstance(projects, list)
+                or not projects
+                or not isinstance(changes, list)
+                or not changes
+            ):
+                continue
             query = str(result.get("query", ""))
             frequency = str(result.get("frequency", "once"))
             identity = query
@@ -1736,7 +1922,7 @@ class Repository:
                     "frequency": frequency,
                     "run_status": row["status"],
                     "created_at": row["created_at"],
-                    "project_count": len(result.get("projects", [])),
+                    "project_count": len(projects),
                     "report": result.get("report"),
                     "ai_report": result.get("ai_report") or {"status": "not_generated"},
                 }

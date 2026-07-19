@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 
-Frequency = Literal["once", "daily", "weekly"]
+Frequency = Literal["once", "interval", "daily", "weekly"]
 WeeklyDay = Literal[
     "monday",
     "tuesday",
@@ -20,8 +20,24 @@ WeeklyDay = Literal[
 class TaskRunRequest(BaseModel):
     query: str = Field(min_length=2, max_length=500)
     frequency: Frequency = "once"
+    interval_minutes: int | None = Field(default=None, ge=1, le=1440)
     subject: str | None = Field(default=None, max_length=120)
     region: str | None = Field(default=None, max_length=50)
+
+    @field_validator("interval_minutes")
+    @classmethod
+    def validate_interval_minutes(cls, value: int | None) -> int | None:
+        if value is not None and value < 3:
+            raise ValueError("定时任务最短间隔为 3 分钟。")
+        return value
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "TaskRunRequest":
+        if self.frequency == "interval" and self.interval_minutes is None:
+            raise ValueError("interval schedule requires interval_minutes")
+        if self.frequency != "interval" and self.interval_minutes is not None:
+            raise ValueError("interval_minutes is only valid for interval schedules")
+        return self
 
 
 class TaskRunResponse(BaseModel):
@@ -43,12 +59,20 @@ class TaskRunResponse(BaseModel):
 class SubscriptionCreateRequest(BaseModel):
     query: str = Field(min_length=2, max_length=500)
     frequency: Frequency
+    interval_minutes: int | None = Field(default=None, ge=1, le=1440)
     timezone: str = "Asia/Shanghai"
     local_time: str | None = None
     weekly_day: WeeklyDay | None = None
     run_at: AwareDatetime | None = None
     max_retries: int = Field(default=3, ge=0, le=10)
     retry_backoff_seconds: int = Field(default=30, ge=1, le=3600)
+
+    @field_validator("interval_minutes")
+    @classmethod
+    def validate_interval_minutes(cls, value: int | None) -> int | None:
+        if value is not None and value < 3:
+            raise ValueError("定时任务最短间隔为 3 分钟。")
+        return value
 
     @field_validator("timezone")
     @classmethod
@@ -81,7 +105,20 @@ class SubscriptionCreateRequest(BaseModel):
                 raise ValueError("weekly_day is only valid for weekly schedules")
             if self.local_time is None:
                 self.local_time = self.run_at.astimezone(ZoneInfo(self.timezone)).strftime("%H:%M")
+            if self.interval_minutes is not None:
+                raise ValueError("interval_minutes is only valid for interval schedules")
+        elif self.frequency == "interval":
+            if self.interval_minutes is None:
+                raise ValueError("interval schedule requires interval_minutes")
+            if self.run_at is not None:
+                raise ValueError("run_at is only valid for once schedules")
+            if self.weekly_day is not None:
+                raise ValueError("weekly_day is only valid for weekly schedules")
+            if self.local_time is None:
+                self.local_time = "00:00"
         else:
+            if self.interval_minutes is not None:
+                raise ValueError("interval_minutes is only valid for interval schedules")
             if self.run_at is not None:
                 raise ValueError("run_at is only valid for once schedules")
             if self.local_time is None:
@@ -97,6 +134,7 @@ class SubscriptionResponse(BaseModel):
     task_id: str
     query: str
     frequency: Frequency
+    interval_minutes: int | None
     timezone: str
     local_time: str
     weekly_day: WeeklyDay | None
@@ -118,6 +156,34 @@ class SubscriptionListResponse(BaseModel):
     items: list[SubscriptionResponse]
 
 
+class SubscriptionRunProject(BaseModel):
+    project_id: str
+    title: str
+    source_name: str
+    published_at: str | None = None
+    url: str = ""
+    summary: str = ""
+
+
+class SubscriptionRunSummary(BaseModel):
+    run_id: str
+    scheduled_for: AwareDatetime
+    status: Literal["running", "succeeded", "failed", "lease_expired"]
+    outcome: Literal["running", "new_content", "no_change", "failed"]
+    retry_count: int
+    started_at: AwareDatetime
+    completed_at: AwareDatetime | None
+    error: str | None
+    project_count: int
+    projects: list[SubscriptionRunProject]
+    report_available: bool
+
+
+class SubscriptionDetailResponse(BaseModel):
+    subscription: SubscriptionResponse
+    runs: list[SubscriptionRunSummary]
+
+
 class NaturalLanguageSubscriptionCreateRequest(BaseModel):
     query: str = Field(max_length=500)
     timezone: str = "Asia/Shanghai"
@@ -127,6 +193,7 @@ class NaturalLanguageSubscriptionCreateRequest(BaseModel):
 
 class ScheduleIntentResponse(BaseModel):
     frequency: Frequency
+    interval_minutes: int | None
     timezone: str
     local_time: str
     weekly_day: WeeklyDay | None

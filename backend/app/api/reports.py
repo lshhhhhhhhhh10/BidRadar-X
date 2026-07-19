@@ -19,6 +19,7 @@ from ..services.demo_shanghai_property import (
 )
 from ..services.docx_publisher import DocxPublisher, build_report_filename
 from ..services.publisher import REPORT_DIR
+from ..services.source_failures import source_failure_reason
 from ..storage.repository import Repository
 
 
@@ -221,15 +222,19 @@ def _source_outcomes(run: object) -> list[dict]:
     for source in run.get("selected_sources", []):
         if not isinstance(source, dict):
             continue
-        outcomes.append(
-            {
+        outcome = {
                 "source_id": source.get("source_id") or source.get("id"),
                 "name": source.get("name") or source.get("source_id") or "未知来源",
                 "status": source.get("collection_status") or "not_attempted",
                 "record_count": int(source.get("record_count") or 0),
                 "requires_login": bool(source.get("requires_login") or source.get("requires_auth")),
+                "attempt_count": int(source.get("attempt_count") or 0),
             }
-        )
+        if outcome["status"] == "failed":
+            outcome["failure_reason"] = (
+                source.get("failure_reason") or source_failure_reason(source)
+            )
+        outcomes.append(outcome)
     return outcomes
 
 

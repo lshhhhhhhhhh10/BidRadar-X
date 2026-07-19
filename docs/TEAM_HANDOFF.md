@@ -1,5 +1,7 @@
 # BidRadar-X 团队交接入口
 
+> 历史交接说明：本文保留 2026-07-15 的恢复与审计过程。仓库当前正式主线已统一为 `main`；新开发者请从 [README](../README.md)、[评委指南](JUDGE_GUIDE.md) 和新版 [GitHub 协作规范](GITHUB_WORKFLOW.md) 开始，不要继续使用文中的旧 `recovery/*` 分支命令。
+
 更新时间：2026-07-15（Asia/Shanghai）
 
 这份文档不依赖任何 Codex 历史聊天。新队员或新的 Codex 任务只要拿到仓库，就应先读本文，再读 [ROADMAP](ROADMAP.md)、[WORK_PLAN](WORK_PLAN.md) 和 [C01 日志](worklogs/C01-roadmap-handoff.md)。

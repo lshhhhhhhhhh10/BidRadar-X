@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .source_failures import source_failure_reason
+
 
 _STAGE_DEFINITIONS = (
     ("intent", "理解检索意图", "task_spec", {"intent-extraction"}),
@@ -165,7 +167,12 @@ def _stage_details(stage_id: str, state: dict[str, Any]) -> tuple[dict[str, Any]
                     "collected_count": collected,
                     "relevant_count": relevant if relevance_finished else None,
                     "requires_login": bool(item.get("requires_login")),
-                    "failure_reason": _source_failure_reason(item) if result == "failed" else None,
+                    "failure_reason": (
+                        item.get("failure_reason") or source_failure_reason(item)
+                        if result == "failed"
+                        else None
+                    ),
+                    "attempt_count": int(item.get("attempt_count") or 0),
                 }
             )
         successful = sum(item["status"] == "success" for item in sources)
@@ -215,29 +222,6 @@ def _stage_details(stage_id: str, state: dict[str, Any]) -> tuple[dict[str, Any]
     }, summary
 
 
-def _source_failure_reason(item: dict[str, Any]) -> str:
-    error_type = str(item.get("error_type") or "")
-    message = str(item.get("error") or "")
-    if "Budget" in error_type:
-        return "当日预算不足，请求未发送"
-    if "Authentication" in error_type or "Credential" in error_type:
-        return "授权缺失或已失效"
-    if "Timeout" in error_type:
-        return "官网响应超时，自动重试后仍未恢复"
-    if "AccessBlocked" in error_type or "AccessRestricted" in error_type:
-        return "官网拒绝匿名自动访问或要求人工验证"
-    if "TemporaryUnavailable" in error_type:
-        return "官网搜索服务持续繁忙，自动重试后仍未恢复"
-    if "StructureChanged" in error_type or "Parse" in error_type:
-        return "官网响应结构发生变化，当前解析未通过"
-    http_status = re.search(r"HTTP(?: status)?\s+(\d{3})", message, re.IGNORECASE)
-    if http_status:
-        return f"官网返回 HTTP {http_status.group(1)}，自动重试未恢复"
-    if "network" in message.casefold() or "request failed" in message.casefold():
-        return "官网网络连接失败，自动重试后仍未恢复"
-    return "来源暂时不可用"
-
-
 def _ai_evidence(audits: list[dict[str, Any]], prompt_ids: set[str]) -> dict[str, Any]:
     matches = [item for item in audits if item.get("prompt_id") in prompt_ids]
     completed = [item for item in matches if item.get("status") == "completed"]
@@ -257,6 +241,8 @@ def _ai_evidence(audits: list[dict[str, Any]], prompt_ids: set[str]) -> dict[str
         "model": latest.get("model"),
         "latency_ms": latest.get("latency_ms"),
         "call_count": len(completed),
+        "failure_reason": latest.get("failure_reason"),
+        "provider_code": latest.get("provider_code"),
     }
 
 
@@ -271,7 +257,12 @@ def _date_range(spec: dict[str, Any]) -> str:
 def _frequency_label(value: Any) -> str:
     mapping = {"once": "单次", "daily": "每日", "weekly": "每周"}
     if isinstance(value, dict):
-        value = value.get("frequency") or value.get("type")
+        frequency = value.get("frequency") or value.get("type")
+        if frequency == "interval":
+            return f"每 {value.get('interval_minutes') or 3} 分钟"
+        value = frequency
+    if value == "interval":
+        return "按分钟间隔"
     return mapping.get(str(value), str(value or "单次"))
 
 

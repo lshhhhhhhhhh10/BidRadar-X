@@ -70,7 +70,10 @@ def understand_requirement(state: dict[str, Any]) -> dict[str, Any]:
         exclusions=["网站服务器故障", "游戏服务器", "不包含服务器"],
         time_range_start=range_start,
         time_range_end=range_end,
-        schedule=ScheduleSpec(frequency=state["frequency"]),
+        schedule=ScheduleSpec(
+            frequency=state["frequency"],
+            interval_minutes=state.get("interval_minutes"),
+        ),
     )
     coordinator = AICoordinator()
     ai_intent, audit = coordinator.understand_intent(

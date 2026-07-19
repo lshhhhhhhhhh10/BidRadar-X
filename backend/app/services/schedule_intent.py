@@ -25,11 +25,17 @@ TIME_PATTERN = re.compile(
     r"(?P<hour>\d{1,2})\s*(?:点|时)"
     r"(?:(?P<half>半)|(?P<cn_minute>\d{1,2})\s*分?)?"
 )
+INTERVAL_PATTERN = re.compile(
+    r"(?:每隔|每)\s*(?P<count>\d{1,4}|[一二两三四五六七八九十]{1,4})\s*(?:分钟|分)"
+)
+MIN_INTERVAL_MINUTES = 3
+MAX_INTERVAL_MINUTES = 1440
 
 
 @dataclass(frozen=True)
 class ScheduleIntent:
     frequency: Frequency
+    interval_minutes: int | None
     timezone: str
     local_time: str
     weekly_day: WeeklyDay | None
@@ -70,6 +76,7 @@ class ScheduleIntentParser:
 
         normalized = re.sub(r"\s+", " ", query.strip().replace("：", ":"))
         daily_match = re.search(r"每天|每日", normalized)
+        interval_matches = list(INTERVAL_PATTERN.finditer(normalized))
         weekly_matches = list(re.finditer(r"(?:每周|周)([一二三四五六日天])", normalized))
         date_matches = list(re.finditer(r"\d{4}-\d{2}-\d{2}", normalized))
         tomorrow_match = re.search(r"明天", normalized)
@@ -77,6 +84,7 @@ class ScheduleIntentParser:
         schedule_found = any(
             (
                 daily_match is not None,
+                bool(interval_matches),
                 bool(weekly_matches),
                 bool(date_matches),
                 tomorrow_match is not None,
@@ -87,7 +95,7 @@ class ScheduleIntentParser:
                 "schedule_not_found",
                 "query does not contain a supported schedule expression",
             )
-        if not time_matches:
+        if not interval_matches and not time_matches:
             raise ScheduleIntentError(
                 "schedule_invalid",
                 "schedule expression must include an explicit time",
@@ -96,6 +104,7 @@ class ScheduleIntentParser:
         cadence_count = sum(
             (
                 daily_match is not None,
+                bool(interval_matches),
                 bool(weekly_matches),
                 bool(date_matches) or tomorrow_match is not None,
             )
@@ -105,6 +114,17 @@ class ScheduleIntentParser:
                 "schedule_ambiguous",
                 "query contains conflicting schedule frequencies or dates",
             )
+
+        interval_values = {
+            self._parse_interval_minutes(match.group("count"))
+            for match in interval_matches
+        }
+        if len(interval_values) > 1:
+            raise ScheduleIntentError(
+                "schedule_ambiguous",
+                "query contains more than one interval",
+            )
+        interval_minutes = next(iter(interval_values), None)
 
         weekly_days = {match.group(1) for match in weekly_matches}
         if len(weekly_days) > 1:
@@ -127,12 +147,12 @@ class ScheduleIntentParser:
                 "schedule_ambiguous",
                 "query contains more than one distinct time",
             )
-        hour, minute = parsed_times[0]
+        hour, minute = parsed_times[0] if parsed_times else (0, 0)
 
         search_query = normalized
         schedule_matches = [
             match
-            for match in [daily_match, tomorrow_match, *weekly_matches, *date_matches]
+            for match in [daily_match, tomorrow_match, *interval_matches, *weekly_matches, *date_matches]
             if match is not None
         ]
         removable_matches = schedule_matches + time_matches
@@ -179,12 +199,15 @@ class ScheduleIntentParser:
 
         return ScheduleIntent(
             frequency=(
-                "daily"
+                "interval"
+                if interval_minutes is not None
+                else "daily"
                 if daily_match is not None
                 else "weekly"
                 if weekly_match is not None
                 else "once"
             ),
+            interval_minutes=interval_minutes,
             timezone=timezone,
             local_time=f"{hour:02d}:{minute:02d}",
             weekly_day=WEEKDAYS[weekly_match.group(1)] if weekly_match is not None else None,
@@ -192,6 +215,31 @@ class ScheduleIntentParser:
             search_query=search_query,
             matched_text=matched_text,
         )
+
+    @staticmethod
+    def _parse_interval_minutes(value: str) -> int:
+        if value.isdigit():
+            minutes = int(value)
+        else:
+            digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+            if value == "十":
+                minutes = 10
+            elif "十" in value:
+                left, right = value.split("十", 1)
+                minutes = digits.get(left, 1) * 10 + digits.get(right, 0)
+            else:
+                minutes = digits.get(value, 0)
+        if minutes < MIN_INTERVAL_MINUTES:
+            raise ScheduleIntentError(
+                "interval_too_short",
+                f"定时任务最短间隔为 {MIN_INTERVAL_MINUTES} 分钟。",
+            )
+        if minutes > MAX_INTERVAL_MINUTES:
+            raise ScheduleIntentError(
+                "schedule_invalid",
+                f"定时任务间隔不能超过 {MAX_INTERVAL_MINUTES} 分钟。",
+            )
+        return minutes
 
     @staticmethod
     def _parse_time(match: re.Match[str]) -> tuple[int, int]:

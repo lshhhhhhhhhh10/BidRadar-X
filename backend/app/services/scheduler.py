@@ -36,6 +36,7 @@ class LocalScheduler:
         self,
         frequency: str,
         *,
+        interval_minutes: int | None = None,
         timezone_name: str | None = None,
         local_time: str = "09:00",
         weekly_day: str | None = None,
@@ -47,6 +48,10 @@ class LocalScheduler:
         if legacy_call:
             if frequency == "once":
                 return None
+            if frequency == "interval":
+                if interval_minutes is None:
+                    raise ValueError("interval schedule requires interval_minutes")
+                return (reference + timedelta(minutes=interval_minutes)).isoformat(timespec="seconds")
             if frequency in {"daily", "weekly"}:
                 days = 1 if frequency == "daily" else 7
                 return (reference + timedelta(days=days)).isoformat(timespec="seconds")
@@ -59,6 +64,11 @@ class LocalScheduler:
             if result <= reference:
                 raise ValueError("run_at must be in the future")
             return result
+
+        if frequency == "interval":
+            if interval_minutes is None or not 3 <= interval_minutes <= 1440:
+                raise ValueError("interval_minutes must be between 3 and 1440")
+            return reference + timedelta(minutes=interval_minutes)
 
         zone = ZoneInfo(timezone_name)
         wall_time = time.fromisoformat(local_time)
@@ -132,6 +142,7 @@ class SubscriptionService:
         task_id: str | None = None,
         query: str,
         frequency: str,
+        interval_minutes: int | None = None,
         timezone_name: str,
         local_time: str,
         weekly_day: str | None,
@@ -146,6 +157,7 @@ class SubscriptionService:
         now = self.clock.now()
         next_run_at = cast(datetime, self.scheduler.next_run_at(
             frequency=frequency,
+            interval_minutes=interval_minutes,
             timezone_name=timezone_name,
             local_time=local_time,
             weekly_day=weekly_day,
@@ -156,6 +168,7 @@ class SubscriptionService:
             task_id=resolved_task_id,
             query=query,
             frequency=frequency,
+            interval_minutes=interval_minutes,
             timezone_name=timezone_name,
             local_time=local_time,
             weekly_day=weekly_day,
@@ -186,6 +199,7 @@ class SubscriptionService:
         else:
             next_run_at = cast(datetime, self.scheduler.next_run_at(
                 frequency=task["frequency"],
+                interval_minutes=task.get("interval_minutes"),
                 timezone_name=task["timezone"],
                 local_time=task["local_time"],
                 weekly_day=task["weekly_day"],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -87,7 +88,10 @@ class ReportFinding(AIContract):
 class NoticeNarrative(AIContract):
     notice_id: str = Field(min_length=1, max_length=200)
     summary: str = Field(min_length=1, max_length=800)
+    risk_level: Literal["low", "medium", "high", "unknown"]
+    risk_assessment: str = Field(min_length=1, max_length=800)
     risk_points: list[str] = Field(default_factory=list, max_length=8)
+    opportunity_points: list[str] = Field(default_factory=list, max_length=8)
     next_actions: list[str] = Field(default_factory=list, max_length=8)
     evidence_ids: list[str] = Field(min_length=1, max_length=12)
 

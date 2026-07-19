@@ -24,6 +24,23 @@ class ScheduleIntentParserTest(unittest.TestCase):
         self.assertIsNone(result.run_at)
         self.assertEqual(result.search_query, "查询安徽省服务器采购项目")
 
+    def test_three_minute_interval_is_parsed_without_requiring_a_clock(self) -> None:
+        result = self.parser.parse(
+            "每隔三分钟查询全国范围内的人工智能采购信息",
+            now=self.now,
+        )
+
+        self.assertEqual(result.frequency, "interval")
+        self.assertEqual(result.interval_minutes, 3)
+        self.assertEqual(result.search_query, "查询全国范围内的人工智能采购信息")
+        self.assertIsNone(result.run_at)
+
+    def test_interval_shorter_than_three_minutes_is_rejected(self) -> None:
+        with self.assertRaises(ScheduleIntentError) as caught:
+            self.parser.parse("每隔2分钟查询服务器采购", now=self.now)
+
+        self.assertEqual(caught.exception.code, "interval_too_short")
+
     def test_weekly_afternoon_time_uses_the_requested_weekday(self) -> None:
         result = self.parser.parse(
             "每周一下午3点查询上海市计算设备采购",
@@ -31,6 +48,7 @@ class ScheduleIntentParserTest(unittest.TestCase):
         )
 
         self.assertEqual(result.frequency, "weekly")
+        self.assertIsNone(result.interval_minutes)
         self.assertEqual(result.local_time, "15:00")
         self.assertEqual(result.weekly_day, "monday")
         self.assertEqual(result.search_query, "查询上海市计算设备采购")
