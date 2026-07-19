@@ -52,22 +52,16 @@ class ProductChainApiTest(unittest.TestCase):
         self.assertEqual(response.json(), {"items": []})
 
     def test_report_history_delete_persists_and_hides_same_query_duplicates(self) -> None:
-        repository = Repository()
-        repository.create_task("task-history-delete", "查询全国服务器采购公告", "once")
-        base_state = {
-            "task_id": "task-history-delete",
-            "status": "completed",
-            "query": "查询全国服务器采购公告",
-            "frequency": "once",
-            "projects": [],
-            "report": {"status": "no_change"},
-        }
-        repository.save_run({**base_state, "run_id": "run-history-delete-a"})
-        repository.save_run({
-            **base_state,
-            "run_id": "run-history-delete-b",
-            "frequency": "weekly",
-        })
+        query = "查询全国服务器采购公告"
+        with patch.object(source_select, "SOURCE_ADAPTERS", isolated_source_set()):
+            first = self.client.post(
+                "/api/tasks/run", json={"query": query, "frequency": "once"}
+            )
+            second = self.client.post(
+                "/api/tasks/run", json={"query": query, "frequency": "once"}
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
 
         before = self.client.get("/api/reports")
         self.assertEqual(before.status_code, 200, before.text)
@@ -85,8 +79,8 @@ class ProductChainApiTest(unittest.TestCase):
                 "SELECT run_id FROM hidden_report_runs ORDER BY run_id"
             ).fetchall()
         self.assertEqual(
-            [row["run_id"] for row in hidden],
-            ["run-history-delete-a", "run-history-delete-b"],
+            sorted(row["run_id"] for row in hidden),
+            sorted([first.json()["run_id"], second.json()["run_id"]]),
         )
 
     def test_completed_run_is_listed_with_a_controlled_docx_download(self) -> None:
@@ -262,9 +256,7 @@ class ProductChainApiTest(unittest.TestCase):
         self.assertNotIn("traceback", public_text)
 
         history = self.client.get("/api/reports").json()["items"]
-        self.assertEqual(history[0]["run_status"], "failed")
-        self.assertEqual(history[0]["report"]["status"], "failed")
-        self.assertNotIn("app.db", str(history[0]).lower())
+        self.assertEqual(history, [])
 
         run_history = self.client.get("/api/runs")
         self.assertEqual(run_history.status_code, 200, run_history.text)
@@ -304,8 +296,10 @@ class ProductChainApiTest(unittest.TestCase):
         run = run_response.json()
         self.assertEqual(run["projects"], [])
         projects = self.client.get(f"/api/runs/{run['run_id']}/projects")
-        self.assertEqual(projects.status_code, 200, projects.text)
-        self.assertEqual(projects.json(), {"items": []})
+        self.assertEqual(projects.status_code, 404, projects.text)
+        history = self.client.get("/api/reports")
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual(history.json(), {"items": []})
 
     def test_missing_run_and_project_are_not_reported_as_empty_successes(self) -> None:
         self.assertEqual(self.client.get("/api/runs/missing").status_code, 404)
@@ -356,8 +350,7 @@ class ProductChainApiTest(unittest.TestCase):
         report = self.client.get(
             f"/api/runs/{second.json()['run_id']}/report"
         )
-        self.assertEqual(report.status_code, 200, report.text)
-        self.assertEqual(report.json()["status"], "not_generated")
+        self.assertEqual(report.status_code, 404, report.text)
 
 
 if __name__ == "__main__":

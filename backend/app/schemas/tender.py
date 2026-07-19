@@ -34,7 +34,8 @@ class ContractModel(BaseModel):
 class ScheduleSpec(ContractModel):
     """Execution cadence supplied by a monitoring task."""
 
-    frequency: Literal["once", "daily", "weekly"] = "once"
+    frequency: Literal["once", "interval", "daily", "weekly"] = "once"
+    interval_minutes: int | None = Field(default=None, ge=3, le=1440)
     timezone: str = Field(default="Asia/Shanghai", min_length=1)
 
     @field_validator("timezone")
@@ -45,6 +46,14 @@ class ScheduleSpec(ContractModel):
         except (ZoneInfoNotFoundError, ValueError) as error:
             raise ValueError("timezone must be a valid IANA timezone") from error
         return value
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "ScheduleSpec":
+        if self.frequency == "interval" and self.interval_minutes is None:
+            raise ValueError("interval schedule requires interval_minutes")
+        if self.frequency != "interval" and self.interval_minutes is not None:
+            raise ValueError("interval_minutes is only valid for interval schedules")
+        return self
 
 
 class TaskSpec(ContractModel):

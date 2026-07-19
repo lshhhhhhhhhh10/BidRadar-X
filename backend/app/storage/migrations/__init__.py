@@ -16,6 +16,10 @@ from .v0007_daily_spend_guard import CHECKSUM as V0007_CHECKSUM
 from .v0007_daily_spend_guard import upgrade as upgrade_v0007
 from .v0008_history_duplicate_tombstones import CHECKSUM as V0008_CHECKSUM
 from .v0008_history_duplicate_tombstones import upgrade as upgrade_v0008
+from .v0009_interval_subscriptions import CHECKSUM as V0009_CHECKSUM
+from .v0009_interval_subscriptions import upgrade as upgrade_v0009
+from .v0010_external_delivery_outbox import CHECKSUM as V0010_CHECKSUM
+from .v0010_external_delivery_outbox import upgrade as upgrade_v0010
 
 
 MIGRATION_SPECS = (
@@ -27,4 +31,6 @@ MIGRATION_SPECS = (
     (6, "hidden_report_runs", V0006_CHECKSUM, upgrade_v0006),
     (7, "daily_spend_guard", V0007_CHECKSUM, upgrade_v0007),
     (8, "history_duplicate_tombstones", V0008_CHECKSUM, upgrade_v0008),
+    (9, "interval_subscriptions", V0009_CHECKSUM, upgrade_v0009),
+    (10, "external_delivery_outbox", V0010_CHECKSUM, upgrade_v0010),
 )

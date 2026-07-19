@@ -7,6 +7,7 @@ from ..schemas.task import (
     NaturalLanguageSubscriptionCreateRequest,
     NaturalLanguageSubscriptionCreateResponse,
     SubscriptionCreateRequest,
+    SubscriptionDetailResponse,
     SubscriptionListResponse,
     SubscriptionResponse,
 )
@@ -36,6 +37,7 @@ def _create_validated_subscription(
     return service.create(
         query=request.query,
         frequency=request.frequency,
+        interval_minutes=request.interval_minutes,
         timezone_name=request.timezone,
         local_time=request.local_time,
         weekly_day=request.weekly_day,
@@ -71,6 +73,7 @@ def create_subscription_from_query(
         structured = SubscriptionCreateRequest(
             query=intent.search_query,
             frequency=intent.frequency,
+            interval_minutes=intent.interval_minutes,
             timezone=intent.timezone,
             local_time=intent.local_time,
             weekly_day=intent.weekly_day,
@@ -94,6 +97,7 @@ def create_subscription_from_query(
         "subscription": subscription,
         "parsed": {
             "frequency": intent.frequency,
+            "interval_minutes": intent.interval_minutes,
             "timezone": intent.timezone,
             "local_time": intent.local_time,
             "weekly_day": intent.weekly_day,
@@ -109,12 +113,82 @@ def list_subscriptions() -> dict:
     return {"items": _service().list()}
 
 
+@router.get("/{task_id}/detail", response_model=SubscriptionDetailResponse)
+def get_subscription_detail(task_id: str) -> dict:
+    subscription = _service().get(task_id)
+    if subscription is None:
+        raise HTTPException(status_code=404, detail="subscription not found")
+
+    repository = Repository()
+    runs = [
+        _subscription_run_summary(item, repository.get_run(item["run_id"]))
+        for item in reversed(repository.list_schedule_runs(task_id))
+    ]
+    return {"subscription": subscription, "runs": runs[:100]}
+
+
 @router.get("/{task_id}", response_model=SubscriptionResponse)
 def get_subscription(task_id: str) -> dict:
     task = _service().get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="subscription not found")
     return task
+
+
+def _subscription_run_summary(schedule_run: dict, result: dict | None) -> dict:
+    changes = list((result or {}).get("changes") or [])
+    changed_project_ids = {
+        str(item.get("project_id"))
+        for item in changes
+        if item.get("project_id")
+    }
+    projects = [
+        _subscription_project(project)
+        for project in (result or {}).get("projects", [])
+        if str(project.get("project_id")) in changed_project_ids
+    ]
+    schedule_status = schedule_run["status"]
+    if schedule_status in {"failed", "lease_expired"}:
+        outcome = "failed"
+    elif schedule_status == "running":
+        outcome = "running"
+    elif changed_project_ids:
+        outcome = "new_content"
+    else:
+        outcome = "no_change"
+    report = (result or {}).get("report") or {}
+    return {
+        **schedule_run,
+        "outcome": outcome,
+        "project_count": len(projects),
+        "projects": projects,
+        "report_available": report.get("status") == "generated",
+    }
+
+
+def _subscription_project(project: dict) -> dict:
+    notices = [
+        document.get("notice")
+        for document in project.get("documents", [])
+        if isinstance(document.get("notice"), dict)
+    ]
+    primary = max(
+        notices,
+        key=lambda notice: (
+            notice.get("source", {}).get("authority") or 0,
+            notice.get("published_at") or "",
+        ),
+        default={},
+    )
+    source = primary.get("source") or {}
+    return {
+        "project_id": str(project.get("project_id") or ""),
+        "title": primary.get("title") or project.get("title") or "未命名项目",
+        "source_name": source.get("source_name") or "来源未标注",
+        "published_at": primary.get("published_at"),
+        "url": source.get("source_url") or "",
+        "summary": str(primary.get("core_content") or "")[:280],
+    }
 
 
 @router.post("/{task_id}/pause", response_model=SubscriptionResponse)

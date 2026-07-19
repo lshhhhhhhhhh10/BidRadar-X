@@ -7,12 +7,18 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from docx import Document
 from fastapi.testclient import TestClient
 
 from app.ai.client import StructuredAIClient
-from app.ai.config import AISettings, clear_runtime_api_key
+from app.ai.config import (
+    AISettings,
+    clear_runtime_api_key,
+    clear_runtime_profiles,
+    configure_runtime_profile,
+)
 from app.ai.prompts import INTENT_PROMPT
 from app.main import app
 from app.services.docx_publisher import DocxPublisher
@@ -22,6 +28,7 @@ from tests.integration_support import make_notice
 class AIPipelineTest(unittest.TestCase):
     def tearDown(self) -> None:
         clear_runtime_api_key()
+        clear_runtime_profiles()
 
     def test_structured_client_validates_json_and_audits_without_secret(self) -> None:
         captured: dict[str, object] = {}
@@ -110,6 +117,241 @@ class AIPipelineTest(unittest.TestCase):
         self.assertEqual(result.audit["status"], "invalid_output")
         self.assertNotIn("not-json", json.dumps(result.audit))
 
+    def test_balance_error_falls_back_to_free_model_and_keeps_safe_audit(self) -> None:
+        requested_models: list[str] = []
+
+        def transport(request, timeout):
+            payload = json.loads(request.data.decode("utf-8"))
+            requested_models.append(payload["model"])
+            if payload["model"] == "glm-paid":
+                raise HTTPError(
+                    request.full_url,
+                    429,
+                    "balance",
+                    {},
+                    BytesIO(json.dumps({"error": {"code": "1113"}}).encode()),
+                )
+            return {
+                "id": "resp-free",
+                "choices": [{"message": {"content": json.dumps({
+                    "topic": "服务器",
+                    "regions": ["全国"],
+                    "keywords": ["服务器"],
+                    "exclusions": [],
+                    "time_range_start": None,
+                    "time_range_end": None,
+                    "confidence": 0.9,
+                    "interpretation": "检索全国服务器采购公告",
+                }, ensure_ascii=False)}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 8},
+            }
+
+        settings = AISettings(
+            provider="zhipu",
+            api_key="test-secret",
+            base_url="https://open.bigmodel.cn/api/paas/v4",
+            model="glm-paid",
+            protocol="chat_completions_json",
+            timeout_seconds=12,
+            enabled=True,
+            fallback_model="glm-4.7-flash",
+        )
+        result = StructuredAIClient(settings=settings, transport=transport).complete(
+            INTENT_PROMPT,
+            {"query": "全国服务器采购"},
+        )
+
+        self.assertIsNotNone(result.value)
+        self.assertEqual(requested_models, ["glm-paid", "glm-4.7-flash"])
+        self.assertEqual(result.audit["status"], "completed")
+        self.assertEqual(result.audit["model"], "glm-4.7-flash")
+        self.assertEqual(result.audit["fallback_from"], "glm-paid")
+
+    def test_multiple_backend_profiles_fail_over_without_exposing_either_key(self) -> None:
+        first_key = "first-provider-secret"
+        second_key = "second-provider-secret"
+        configure_runtime_profile(
+            label="主密钥",
+            provider="zhipu",
+            api_key=first_key,
+            model="glm-primary",
+            priority=0,
+        )
+        configure_runtime_profile(
+            label="备用密钥",
+            provider="deepseek",
+            api_key=second_key,
+            model="deepseek-chat",
+            priority=10,
+        )
+        authorizations: list[str] = []
+
+        def transport(request, timeout):
+            del timeout
+            authorization = request.get_header("Authorization")
+            authorizations.append(authorization)
+            if authorization == f"Bearer {first_key}":
+                raise HTTPError(
+                    request.full_url,
+                    429,
+                    "balance",
+                    {},
+                    BytesIO(json.dumps({"error": {"code": "1113"}}).encode()),
+                )
+            return {
+                "id": "resp-failover",
+                "choices": [{"message": {"content": json.dumps({
+                    "topic": "服务器",
+                    "regions": ["全国"],
+                    "keywords": ["服务器"],
+                    "exclusions": [],
+                    "time_range_start": None,
+                    "time_range_end": None,
+                    "confidence": 0.9,
+                    "interpretation": "检索全国服务器采购公告",
+                }, ensure_ascii=False)}}],
+            }
+
+        with patch.dict(os.environ, {"BIDRADAR_AI_API_KEY": ""}, clear=False):
+            result = StructuredAIClient(transport=transport).complete(
+                INTENT_PROMPT,
+                {"query": "服务器"},
+            )
+
+        self.assertIsNotNone(result.value)
+        self.assertEqual(authorizations, [f"Bearer {first_key}", f"Bearer {second_key}"])
+        self.assertEqual(result.audit["provider"], "deepseek")
+        self.assertEqual(result.audit["failover_count"], 1)
+        serialized = json.dumps(result.audit, ensure_ascii=False)
+        self.assertNotIn(first_key, serialized)
+        self.assertNotIn(second_key, serialized)
+
+    def test_rate_limited_profile_immediately_fails_over_and_enters_backoff(self) -> None:
+        first_key = "rate-limited-profile-secret"
+        second_key = "healthy-profile-secret"
+        configure_runtime_profile(
+            label="限流密钥",
+            provider="zhipu",
+            api_key=first_key,
+            model="glm-primary",
+            priority=0,
+        )
+        configure_runtime_profile(
+            label="健康密钥",
+            provider="zhipu",
+            api_key=second_key,
+            model="glm-secondary",
+            priority=10,
+        )
+        authorizations: list[str] = []
+
+        def transport(request, timeout):
+            del timeout
+            authorization = request.get_header("Authorization")
+            authorizations.append(authorization)
+            if authorization == f"Bearer {first_key}":
+                raise HTTPError(
+                    request.full_url,
+                    429,
+                    "rate-limit",
+                    {},
+                    BytesIO(json.dumps({"error": {"code": "1302"}}).encode()),
+                )
+            return {
+                "id": "resp-after-rate-limit",
+                "choices": [{"message": {"content": json.dumps({
+                    "topic": "服务器",
+                    "regions": ["全国"],
+                    "keywords": ["服务器"],
+                    "exclusions": [],
+                    "time_range_start": None,
+                    "time_range_end": None,
+                    "confidence": 0.9,
+                    "interpretation": "检索全国服务器采购公告",
+                }, ensure_ascii=False)}}],
+            }
+
+        with patch.dict(
+            os.environ,
+            {
+                "BIDRADAR_AI_API_KEY": "",
+                "BIDRADAR_AI_SECONDARY_API_KEY": "",
+            },
+            clear=False,
+        ):
+            client = StructuredAIClient(transport=transport)
+            first_result = client.complete(INTENT_PROMPT, {"query": "服务器"})
+            second_result = client.complete(INTENT_PROMPT, {"query": "服务器"})
+
+        self.assertIsNotNone(first_result.value)
+        self.assertIsNotNone(second_result.value)
+        self.assertEqual(
+            authorizations,
+            [
+                f"Bearer {first_key}",
+                f"Bearer {second_key}",
+                f"Bearer {second_key}",
+            ],
+        )
+        self.assertEqual(first_result.audit["failover_count"], 1)
+        self.assertEqual(second_result.audit["status"], "completed")
+
+    def test_environment_secondary_key_is_a_persistent_failover_candidate(self) -> None:
+        primary_key = "primary-environment-secret"
+        secondary_key = "secondary-environment-secret"
+        with patch.dict(
+            os.environ,
+            {
+                "BIDRADAR_AI_API_KEY": primary_key,
+                "BIDRADAR_AI_SECONDARY_API_KEY": secondary_key,
+                "BIDRADAR_AI_PROVIDER": "zhipu",
+                "BIDRADAR_AI_MODEL": "glm-primary",
+                "BIDRADAR_AI_SECONDARY_MODEL": "glm-5.2",
+                "BIDRADAR_AI_ENABLED": "auto",
+            },
+            clear=False,
+        ):
+            candidates = AISettings.candidates()
+
+        environment_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.profile_id.startswith("environment")
+        ]
+        self.assertEqual(
+            [(item.profile_id, item.model) for item in environment_candidates],
+            [("environment", "glm-primary"), ("environment-secondary", "glm-5.2")],
+        )
+        serialized = json.dumps(
+            [item.public_status() for item in environment_candidates],
+            ensure_ascii=False,
+        )
+        self.assertNotIn(primary_key, serialized)
+        self.assertNotIn(secondary_key, serialized)
+
+    def test_profile_api_manages_multiple_redacted_backend_credentials(self) -> None:
+        with patch.dict(os.environ, {"BIDRADAR_AI_API_KEY": ""}, clear=False), TestClient(app) as client:
+            secret = "profile-api-secret-value"
+            created = client.post("/api/ai/profiles", json={
+                "label": "DeepSeek 备用",
+                "provider": "deepseek",
+                "api_key": secret,
+                "model": "deepseek-chat",
+            })
+            self.assertEqual(created.status_code, 201, created.text)
+            self.assertNotIn(secret, created.text)
+            profile_id = created.json()["profile"]["profile_id"]
+            listed = client.get("/api/ai/profiles")
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(len(listed.json()["items"]), 1)
+            self.assertNotIn(secret, listed.text)
+            disabled = client.patch(
+                f"/api/ai/profiles/{profile_id}",
+                json={"enabled": False, "priority": 30},
+            )
+            self.assertFalse(disabled.json()["profile"]["enabled"])
+            self.assertEqual(client.delete(f"/api/ai/profiles/{profile_id}").status_code, 204)
+
     def test_local_backend_credential_enables_status_without_returning_key(self) -> None:
         with patch.dict(os.environ, {"BIDRADAR_AI_API_KEY": ""}, clear=False), TestClient(app) as client:
             before = client.get("/api/ai/status")
@@ -143,7 +385,10 @@ class AIPipelineTest(unittest.TestCase):
                 {
                     "notice_id": notice.notice_id,
                     "summary": "建议核对采购需求附件与截止时间。",
+                    "risk_level": "medium",
+                    "risk_assessment": "截止时间明确，但资格与附件要求仍需逐项复核。",
                     "risk_points": ["截止时间需以原公告为准"],
+                    "opportunity_points": ["采购内容与服务器供应能力直接相关"],
                     "next_actions": ["打开原公告复核"],
                     "evidence_ids": ["ev-test"],
                 }
@@ -167,8 +412,10 @@ class AIPipelineTest(unittest.TestCase):
                 for paragraph in cell.paragraphs
             ]
         )
-        self.assertIn("AI 辅助研判", all_text)
+        self.assertIn("AI 辅助摘要与风险研判", all_text)
         self.assertIn("建议核对采购需求附件与截止时间", all_text)
+        self.assertIn("风险等级", all_text)
+        self.assertIn("机会提示", all_text)
         self.assertIn(notice.core_content, all_text)
 
 

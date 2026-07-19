@@ -23,6 +23,7 @@ class PromptDefinition:
     schema_name: str
     output_model: Type[BaseModel]
     instructions: str
+    max_output_tokens: int = 3200
 
 
 COMMON_GUARDRAILS = """
@@ -110,12 +111,17 @@ VERIFY_PROMPT = PromptDefinition(
 
 REPORT_PROMPT = PromptDefinition(
     prompt_id="evidence-report",
-    version="1.0.0",
+    version="2.0.0",
     schema_name="bidradar_report",
     output_model=ReportDraft,
     instructions=f"""{COMMON_GUARDRAILS}
-任务：为 Word 报告生成简洁的执行摘要、关键发现和逐公告辅助研判。
+任务：为每个项目 Word 报告生成可审计的 AI 辅助摘要、机会提示和风险研判。
+必须为输入中的每个 notice_id 恰好返回一条 notice_narratives，notice_id 只能从输入中选择。
 每项结论必须绑定输入中真实存在的 evidence_id；事实、数字、日期必须与证据一致。
-不要改写成与原文含义不同的表述。风险和下一步动作应明确标注为研判建议，不得伪装成公告事实。
-notice_id 只能从输入中选择。""",
+summary 只总结采购对象、采购人、预算/截止时间和核心要求中证据明确披露的内容。
+risk_level 只能根据已披露证据选择 low、medium、high 或 unknown；信息不足必须选择 unknown。
+risk_assessment 要说明判断依据，不得把“未披露”表述为风险事实；risk_points、opportunity_points、
+next_actions 均为辅助研判，必须使用审慎措辞，不得给出法律、财务或中标保证。
+不得改写或替代原公告事实；Word 中的原始字段、原文核心内容、来源链接和附件链接由程序锁定。""",
+    max_output_tokens=5000,
 )

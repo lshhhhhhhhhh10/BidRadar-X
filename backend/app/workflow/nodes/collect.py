@@ -4,6 +4,10 @@ import asyncio
 from typing import Any
 
 from ...schemas.tender import TenderNotice
+from ...services.source_failures import (
+    source_failure_is_retryable,
+    source_failure_reason,
+)
 from .common import step
 from . import source_select
 
@@ -14,26 +18,40 @@ async def _collect_source(
     search_plan: dict[str, Any],
 ) -> tuple[dict[str, Any], list[TenderNotice]]:
     metadata = adapter.metadata
-    try:
-        raw_notices = await asyncio.wait_for(
-            adapter.collect(task_spec, search_plan),
-            timeout=90,
-        )
-        notices = [
-            item if isinstance(item, TenderNotice) else TenderNotice.model_validate(item)
-            for item in raw_notices
-        ]
-    except Exception as error:
+    errors: list[Exception] = []
+    notices: list[TenderNotice] = []
+    attempt_count = 0
+    for attempt_count in range(1, 3):
+        try:
+            raw_notices = await asyncio.wait_for(
+                adapter.collect(task_spec, search_plan),
+                timeout=90,
+            )
+            notices = [
+                item if isinstance(item, TenderNotice) else TenderNotice.model_validate(item)
+                for item in raw_notices
+            ]
+            break
+        except Exception as error:
+            errors.append(error)
+            if attempt_count >= 2 or not source_failure_is_retryable(error):
+                break
+            await asyncio.sleep(float(attempt_count))
+    if errors and not notices and attempt_count and len(errors) == attempt_count:
+        error = errors[-1]
+        failed = {
+            "source_id": metadata["source_id"],
+            "name": metadata["name"],
+            "requires_login": bool(metadata.get("requires_login")),
+            "status": "failed",
+            "record_count": 0,
+            "attempt_count": attempt_count,
+            "error_type": type(error).__name__,
+            "error": str(error),
+        }
+        failed["failure_reason"] = source_failure_reason(failed)
         return (
-            {
-                "source_id": metadata["source_id"],
-                "name": metadata["name"],
-                "requires_login": bool(metadata.get("requires_login")),
-                "status": "failed",
-                "record_count": 0,
-                "error_type": type(error).__name__,
-                "error": str(error),
-            },
+            failed,
             [],
         )
     return (
@@ -43,6 +61,7 @@ async def _collect_source(
             "requires_login": bool(metadata.get("requires_login")),
             "status": "success",
             "record_count": len(notices),
+            "attempt_count": attempt_count,
         },
         notices,
     )
@@ -72,10 +91,12 @@ async def collect_documents(state: dict[str, Any]) -> dict[str, Any]:
                 {
                     "error_type": results_by_id[source["source_id"]]["error_type"],
                     "error": results_by_id[source["source_id"]]["error"],
+                    "failure_reason": results_by_id[source["source_id"]]["failure_reason"],
                 }
                 if results_by_id[source["source_id"]]["status"] == "failed"
                 else {}
             ),
+            "attempt_count": results_by_id[source["source_id"]].get("attempt_count", 1),
         }
         for source in state["selected_sources"]
     ]

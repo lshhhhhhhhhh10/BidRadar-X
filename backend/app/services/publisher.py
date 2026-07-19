@@ -262,6 +262,7 @@ class Publisher:
             work_items = [
                 (
                     index,
+                    len(ordered_projects),
                     project,
                     query,
                     task_id,
@@ -322,6 +323,7 @@ class Publisher:
     ) -> tuple[dict[str, Any] | None, Path | None]:
         (
             index,
+            project_count,
             project,
             query,
             task_id,
@@ -358,7 +360,7 @@ class Publisher:
                 output_dir=document_staging_dir,
                 clock=lambda value=generated_at: value,
             ).publish(
-                query=f"{query}_{project_title}",
+                query=query,
                 notices=project_notices,
                 report_scope=report_scope,
                 ai_report=Publisher._ai_report_for_project(project_notices, ai_report),
@@ -371,7 +373,11 @@ class Publisher:
             "document_id": document_id,
             "project_id": project_id,
             "project_title": project_title,
-            "filename": build_report_filename(f"{query}_{project_title}", generated_at),
+            "filename": build_report_filename(
+                query,
+                generated_at,
+                project_sequence=index if project_count > 1 else None,
+            ),
             "artifact_uri": internal_name,
             "download_url": (
                 f"/api/reports/{delivery_fingerprint}/documents/{document_id}/download"
@@ -440,6 +446,11 @@ class Publisher:
             for item in ai_report.get("notice_narratives", [])
             if isinstance(item, dict) and item.get("notice_id") in notice_ids
         ]
+        if not narratives:
+            return {
+                "status": "not_generated",
+                "reason": "本项目的 AI 输出未通过证据绑定校验",
+            }
         findings = [
             item
             for item in ai_report.get("key_findings", [])
@@ -456,6 +467,7 @@ class Publisher:
             "executive_summary": summary or "本项目摘要以原公告与关联证据为准。",
             "key_findings": findings,
             "notice_narratives": narratives,
+            "generated_notice_count": len(narratives),
         }
 
     @staticmethod

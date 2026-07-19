@@ -11,6 +11,7 @@ from html.parser import HTMLParser
 import logging
 import mimetypes
 import re
+from threading import Lock
 from time import monotonic
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
@@ -146,6 +147,66 @@ class _SearchItem:
 class _AttachmentLink:
     url: str
     name: str | None
+
+
+class _ChannelListParser(HTMLParser):
+    """Parse CCGP's official central/local announcement directory pages."""
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.items: list[_SearchItem] = []
+        self.found_listing = False
+        self._item_depth = 0
+        self._href: str | None = None
+        self._title = ""
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "li" and self._item_depth == 0:
+            self._item_depth = 1
+            self._href = None
+            self._title = ""
+            self._text = []
+            return
+        if not self._item_depth:
+            return
+        if tag not in _VOID_TAGS:
+            self._item_depth += 1
+        if tag == "a" and attributes.get("href"):
+            candidate = urljoin(self.base_url, attributes["href"] or "")
+            if _is_ccgp_url(candidate):
+                self._href = candidate
+                self._title = _clean_text(attributes.get("title") or "")
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._item_depth:
+            return
+        if tag == "li" and self._item_depth == 1:
+            self._finish_item()
+            self._item_depth = 0
+        elif self._item_depth > 1:
+            self._item_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._item_depth:
+            self._text.append(data)
+
+    def _finish_item(self) -> None:
+        text = _clean_text(" ".join(self._text))
+        title = self._title or _clean_text(text.split("发布时间", 1)[0])
+        if not self._href or not title or _find_datetime(text) is None:
+            return
+        self.found_listing = True
+        self.items.append(
+            _SearchItem(
+                url=self._href,
+                title=title,
+                published_at=_find_datetime(text),
+                region=_find_list_region(text),
+            )
+        )
 
 
 class _SearchResultParser(HTMLParser):
@@ -325,6 +386,10 @@ class CCGPSource:
     """Collect public procurement notices from the official CCGP website."""
 
     SEARCH_URL = "https://search.ccgp.gov.cn/bxsearch"
+    FALLBACK_CHANNEL_URLS = (
+        "https://www.ccgp.gov.cn/cggg/zygg/gkzb/",
+        "https://www.ccgp.gov.cn/cggg/dfgg/gkzb/",
+    )
     USER_AGENT = "BidRadar-X/0.1 (compatible; public procurement notice collector)"
     metadata = {
         "source_id": "ccgp",
@@ -365,7 +430,10 @@ class CCGPSource:
         self._sleep = sleep
         self._clock = clock
         self._now = now or (lambda: datetime.now(tz=SHANGHAI_TZ))
-        self._request_lock = asyncio.Lock()
+        # A production adapter is shared by scheduled and interactive runs, which
+        # may execute on different asyncio event loops. A regular lock protects
+        # rate-limit slot reservation without ever being awaited across loops.
+        self._rate_limit_lock = Lock()
         self._last_request_started: float | None = None
 
     async def collect(
@@ -393,26 +461,38 @@ class CCGPSource:
         search_terms: list[str | None] = planned_terms or [None]
 
         query_regions = task.regions or [""]
+        successful_search_requests = 0
+        last_search_error: Exception | None = None
+        search_blocked = False
         for query_region in query_regions:
             region_scope = [query_region] if query_region else []
             for search_term in search_terms:
                 for page_index in range(1, max_pages + 1):
-                    response = await self._request(
-                        self.SEARCH_URL,
-                        params=self._search_params(
-                            task,
-                            page_index,
-                            query_region,
-                            search_term=search_term,
-                        ),
-                    )
-                    _raise_if_access_blocked(response)
-                    parser = _SearchResultParser(response.url)
-                    parser.feed(response.text)
-                    if not parser.found_results_container:
-                        raise CCGPParseError(
-                            "CCGP search page did not contain the expected results list"
+                    try:
+                        response = await self._request(
+                            self.SEARCH_URL,
+                            params=self._search_params(
+                                task,
+                                page_index,
+                                query_region,
+                                search_term=search_term,
+                            ),
                         )
+                        _raise_if_access_blocked(response)
+                        parser = _SearchResultParser(response.url)
+                        parser.feed(response.text)
+                        if not parser.found_results_container:
+                            raise CCGPParseError(
+                                "CCGP search page did not contain the expected results list"
+                            )
+                    except CCGPAccessBlockedError as error:
+                        last_search_error = error
+                        search_blocked = True
+                        break
+                    except CCGPError as error:
+                        last_search_error = error
+                        break
+                    successful_search_requests += 1
                     if not parser.items:
                         break
                     for item in parser.items:
@@ -423,16 +503,13 @@ class CCGPSource:
                         ):
                             continue
                         seen_urls.add(item.url)
-                        detail_response = await self._request(
-                            item.url,
-                            params=None,
-                        )
-                        _raise_if_access_blocked(detail_response)
                         try:
+                            detail_response = await self._request(item.url, params=None)
+                            _raise_if_access_blocked(detail_response)
                             notice = self._parse_notice(detail_response, task)
-                        except CCGPParseError as error:
+                        except CCGPError as error:
                             logger.warning(
-                                "Skipping unparseable CCGP detail %s: %s",
+                                "Skipping unavailable CCGP detail %s: %s",
                                 item.url,
                                 error,
                             )
@@ -446,6 +523,67 @@ class CCGPSource:
                         notices.append(notice)
                         if len(notices) >= max_notices:
                             return notices
+                if search_blocked:
+                    break
+            if search_blocked:
+                break
+
+        # The public search service occasionally serves a stop/busy page while
+        # CCGP's official announcement directories remain available. Falling
+        # back to those same-domain directories turns that transient condition
+        # into a valid (possibly empty) source result without bypassing controls.
+        if successful_search_requests == 0:
+            if isinstance(last_search_error, CCGPParseError):
+                raise last_search_error
+            fallback_succeeded = False
+            fallback_error: Exception | None = None
+            for channel_url in self.FALLBACK_CHANNEL_URLS:
+                for page_index in range(max_pages):
+                    page_url = _channel_page_url(channel_url, page_index)
+                    try:
+                        response = await self._request(page_url, params=None)
+                        _raise_if_access_blocked(response)
+                        parser = _ChannelListParser(response.url)
+                        parser.feed(response.text)
+                        if not parser.found_listing:
+                            raise CCGPParseError(
+                                "CCGP fallback directory did not contain announcement rows"
+                            )
+                    except Exception as error:
+                        fallback_error = error
+                        break
+                    fallback_succeeded = True
+                    for item in parser.items:
+                        if (
+                            item.url in seen_urls
+                            or not _is_active_procurement_title(item.title)
+                            or not _within_time_range(item.published_at, task)
+                            or not _region_matches(item.region, task.regions)
+                            or not _title_matches_terms(item.title, task, planned_terms)
+                        ):
+                            continue
+                        seen_urls.add(item.url)
+                        try:
+                            detail_response = await self._request(item.url, params=None)
+                            _raise_if_access_blocked(detail_response)
+                            notice = self._parse_notice(detail_response, task)
+                        except CCGPError as error:
+                            logger.warning(
+                                "Skipping unavailable CCGP fallback detail %s: %s",
+                                item.url,
+                                error,
+                            )
+                            continue
+                        if _matches_exclusion(notice, task.exclusions):
+                            continue
+                        notices.append(notice)
+                        if len(notices) >= max_notices:
+                            return notices
+            if not fallback_succeeded:
+                raise CCGPError(
+                    "CCGP search and official fallback directories were both unavailable: "
+                    f"{fallback_error or last_search_error or 'unknown source response'}"
+                ) from (fallback_error or last_search_error)
         return notices
 
     async def _request(
@@ -467,9 +605,13 @@ class CCGPSource:
                     headers=headers,
                     timeout=self.timeout,
                 )
-                if response.status_code in {403, 429}:
+                if response.status_code == 403:
                     raise CCGPAccessBlockedError(
                         "CCGP refused automated access; no bypass was attempted"
+                    )
+                if response.status_code == 429:
+                    last_error = CCGPTemporaryUnavailableError(
+                        "CCGP rate limited the public request"
                     )
                 if response.status_code >= 500:
                     last_error = CCGPError(
@@ -488,10 +630,17 @@ class CCGPSource:
             except CCGPAccessBlockedError:
                 raise
             except HTTPError as error:
-                if error.code in {403, 429}:
+                if error.code == 403:
                     raise CCGPAccessBlockedError(
                         "CCGP refused automated access; no bypass was attempted"
                     ) from error
+                if error.code == 429:
+                    last_error = CCGPTemporaryUnavailableError(
+                        "CCGP rate limited the public request"
+                    )
+                    if attempt < self.max_retries:
+                        await self._sleep(self.retry_backoff * (2**attempt))
+                        continue
                 if error.code < 500:
                     raise CCGPError(f"CCGP returned HTTP {error.code}") from error
                 last_error = error
@@ -503,19 +652,24 @@ class CCGPSource:
             raise CCGPTemporaryUnavailableError(
                 f"CCGP search service stayed busy after {self.max_retries + 1} attempts"
             ) from last_error
+        detail = f"{type(last_error).__name__}: {last_error}" if last_error else "unknown error"
         raise CCGPError(
-            f"CCGP request failed after {self.max_retries + 1} attempts"
+            f"CCGP request failed after {self.max_retries + 1} attempts ({detail})"
         ) from last_error
 
     async def _respect_rate_limit(self) -> None:
-        async with self._request_lock:
+        with self._rate_limit_lock:
             current = self._clock()
-            if self._last_request_started is not None:
-                wait_for = self.min_interval - (current - self._last_request_started)
-                if wait_for > 0:
-                    await self._sleep(wait_for)
-                    current = self._clock()
-            self._last_request_started = current
+            earliest = (
+                self._last_request_started + self.min_interval
+                if self._last_request_started is not None
+                else current
+            )
+            reserved = max(current, earliest)
+            wait_for = max(0.0, reserved - current)
+            self._last_request_started = reserved
+        if wait_for > 0:
+            await self._sleep(wait_for)
 
     def _search_params(
         self,
@@ -747,6 +901,29 @@ def _find_datetime(value: str) -> datetime | None:
 def _find_list_region(value: str) -> str | None:
     match = re.search(r"(?:地域|行政区域)\s*[：:]\s*([^\s]+)", value)
     return match.group(1).strip("，,；;") if match else None
+
+
+def _channel_page_url(channel_url: str, page_index: int) -> str:
+    if page_index <= 0:
+        return channel_url
+    return urljoin(channel_url, f"index_{page_index}.htm")
+
+
+def _is_active_procurement_title(title: str) -> bool:
+    return not re.search(
+        r"中标|成交|结果公告|结果公示|候选人|废标|流标|终止|取消",
+        title,
+    )
+
+
+def _title_matches_terms(
+    title: str,
+    task: TaskSpec,
+    planned_terms: list[str],
+) -> bool:
+    folded = title.casefold()
+    terms = _unique_nonempty([task.topic, *task.keywords, *planned_terms])
+    return not terms or any(term.casefold() in folded for term in terms)
 
 
 def _find_labeled_datetime(

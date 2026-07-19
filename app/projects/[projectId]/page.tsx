@@ -213,20 +213,28 @@ function DemoRequirements({ project }: { project: ProjectProfile }) {
 
 
 function VerifiedRequirements({ project }: { project: ProjectProfile }) {
+  const factCount = project.modules.reduce((total, module) => total + module.facts.length, 0);
+  const tableCount = project.modules.reduce((total, module) => total + module.tables.length, 0);
+  const localAttachmentCount = project.attachments.filter((attachment) => attachment.local_available).length;
+
   return (
     <>
       <section className="project-objective-summary requirements-project-summary">
-        <span>项目摘要</span>
+        <span className="title-with-info">核验概览<InfoTip text="先确认来源和证据完整度，再进入下方模块逐字段核对；摘要只用于快速定位，不替代招标原文。" /></span>
         <p>{project.summary || "公告没有提供可核验的摘要。"}</p>
-        <dl>
+        <dl className="verification-overview-grid">
+          <div><dt>已核验字段</dt><dd>{factCount} 项</dd></div>
+          <div><dt>结构化表格</dt><dd>{tableCount} 张</dd></div>
+          <div><dt>本地附件</dt><dd>{localAttachmentCount} 个</dd></div>
+          <div><dt>证据记录</dt><dd>{project.evidence_count} 条</dd></div>
           <div><dt>发布时间</dt><dd>{project.published_at.slice(0, 10) || "未披露"}</dd></div>
           <div><dt>投标截止</dt><dd>{project.deadline?.replace("T", " ").slice(0, 16) || "未披露"}</dd></div>
-          <div><dt>证据数量</dt><dd>{project.evidence_count} 条</dd></div>
         </dl>
+        {project.url && <a className="verification-source-link" href={project.url} target="_blank" rel="noreferrer">打开来源公告核对 ↗</a>}
       </section>
       <section className="verified-requirements" aria-labelledby="verified-requirements-title">
         <header className="title-with-info">
-          <h2 id="verified-requirements-title">已核验条款</h2>
+          <h2 id="verified-requirements-title">字段与原文证据</h2>
           <InfoTip text="这里只展示来源公告或已归档招标文件中具有字段级证据的条款；没有证据时不会使用演示内容补齐。" />
         </header>
         {project.modules.length ? (

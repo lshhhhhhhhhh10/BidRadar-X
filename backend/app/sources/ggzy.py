@@ -298,7 +298,11 @@ def _find_content_node(root: _Node) -> _Node | None:
     return max(candidates, key=lambda node: len(_clean_inline(node.text())), default=None)
 
 
-def _find_embedded_notice_url(html: str, source_url: str) -> str | None:
+def _find_embedded_notice_url(
+    html: str,
+    source_url: str,
+    source_notice_id: str | None = None,
+) -> str | None:
     script_match = re.search(
         r"firstLastUrl\s*=\s*['\"]([^'\"]+)['\"]",
         html,
@@ -307,6 +311,28 @@ def _find_embedded_notice_url(html: str, source_url: str) -> str | None:
     if script_match:
         resolved = urljoin(source_url, script_match.group(1))
         if resolved.startswith(("https://", "http://")) and resolved != source_url:
+            return resolved
+
+    # Current GGZY aggregate pages load the real notice body through
+    # ``showDetail(..., '/information/deal/html/b/...')`` rather than an
+    # iframe. Prefer the URL carrying the current search-record id because an
+    # aggregate page can also list later corrections and result notices.
+    embedded_paths = re.findall(
+        r"['\"](/information/deal/html/b/[^'\"]+\.html)['\"]",
+        html,
+        flags=re.IGNORECASE,
+    )
+    if embedded_paths:
+        selected = next(
+            (
+                value
+                for value in embedded_paths
+                if source_notice_id and source_notice_id in value
+            ),
+            embedded_paths[0],
+        )
+        resolved = urljoin(source_url, selected)
+        if resolved != source_url:
             return resolved
 
     parser = _HTMLTreeParser()
@@ -631,6 +657,7 @@ class GGZYSource:
         timeout: float = 15.0,
         retries: int = 1,
         request_interval: float = 0.25,
+        retry_backoff: float = 0.75,
         max_pages: int = 100,
         now: Callable[[], datetime] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -641,12 +668,15 @@ class GGZYSource:
             raise ValueError("retries must not be negative")
         if request_interval < 0:
             raise ValueError("request_interval must not be negative")
+        if retry_backoff < 0:
+            raise ValueError("retry_backoff must not be negative")
         if max_pages < 1:
             raise ValueError("max_pages must be at least one")
         self._transport = transport or _UrllibTransport()
         self._timeout = timeout
         self._retries = retries
         self._request_interval = request_interval
+        self._retry_backoff = retry_backoff
         self._max_pages = max_pages
         self._now = now or (lambda: datetime.now(tz=SHANGHAI_TZ))
         self._sleep = sleep
@@ -704,6 +734,8 @@ class GGZYSource:
         )
         requested_regions = task.regions or [None]
         detail_results: dict[str, tuple[GGZYSearchResult, dict[str, str]]] = {}
+        successful_search_requests = 0
+        last_search_error: GGZYSourceError | None = None
 
         for requested_region in requested_regions:
             if len(detail_results) >= max_results:
@@ -721,8 +753,13 @@ class GGZYSource:
                         page_number=page_number,
                         plan=plan,
                     )
-                    response = await self._request("POST", SEARCH_URL, data=form)
-                    search_page = parse_search_response(response.body)
+                    try:
+                        response = await self._request("POST", SEARCH_URL, data=form)
+                        search_page = parse_search_response(response.body)
+                    except GGZYSourceError as error:
+                        last_search_error = error
+                        break
+                    successful_search_requests += 1
                     for result in search_page.results:
                         detail_results.setdefault(result.source_url, (result, dict(form)))
                         if len(detail_results) >= max_results:
@@ -743,49 +780,63 @@ class GGZYSource:
                         f"search exceeded the configured max_pages={max_pages}"
                     )
 
+        if successful_search_requests == 0 and last_search_error is not None:
+            raise last_search_error
+
         notices: list[TenderNotice] = []
+        successful_detail_requests = 0
+        last_detail_error: GGZYSourceError | None = None
         for result, search_form in detail_results.values():
             if not _looks_like_active_procurement_title(result.title):
                 continue
-            response = await self._request("GET", result.source_url, data=None)
-            detail_html = response.text()
-            canonical_notice_url = (
-                result.canonical_notice_url
-                or _find_embedded_notice_url(detail_html, result.source_url)
-            )
-            notice_html = detail_html
-            content_base_url = None
-            if canonical_notice_url:
-                original_response = await self._request(
-                    "GET", canonical_notice_url, data=None
+            try:
+                response = await self._request("GET", result.source_url, data=None)
+                detail_html = response.text()
+                canonical_notice_url = (
+                    result.canonical_notice_url
+                    or _find_embedded_notice_url(
+                        detail_html,
+                        result.source_url,
+                        result.source_notice_id,
+                    )
                 )
-                notice_html = original_response.text()
-                content_base_url = canonical_notice_url
-            notice = self.parse_notice_html(
-                notice_html,
-                source_url=result.source_url,
-                region=result.region,
-                region_evidence_url=SEARCH_URL,
-                region_evidence_quote=result.region_evidence_quote,
-                region_evidence_locator=self._search_evidence_locator(
-                    search_form,
-                    result.source_notice_id,
-                    result.region_field,
-                ),
-                source_name_evidence_url=SEARCH_URL,
-                source_name_evidence_quote=result.source_name_evidence_quote,
-                source_name_evidence_locator=self._search_evidence_locator(
-                    search_form,
-                    result.source_notice_id,
-                    result.source_name_field,
-                ),
-                topic_terms=topic_terms,
-                published_at=result.published_at,
-                source_name=result.source_name,
-                source_notice_id=result.source_notice_id,
-                canonical_notice_url=canonical_notice_url,
-                content_base_url=content_base_url,
-            )
+                notice_html = detail_html
+                content_base_url = None
+                if canonical_notice_url:
+                    original_response = await self._request(
+                        "GET", canonical_notice_url, data=None
+                    )
+                    notice_html = original_response.text()
+                    content_base_url = canonical_notice_url
+                notice = self.parse_notice_html(
+                    notice_html,
+                    source_url=result.source_url,
+                    region=result.region,
+                    region_evidence_url=SEARCH_URL,
+                    region_evidence_quote=result.region_evidence_quote,
+                    region_evidence_locator=self._search_evidence_locator(
+                        search_form,
+                        result.source_notice_id,
+                        result.region_field,
+                    ),
+                    source_name_evidence_url=SEARCH_URL,
+                    source_name_evidence_quote=result.source_name_evidence_quote,
+                    source_name_evidence_locator=self._search_evidence_locator(
+                        search_form,
+                        result.source_notice_id,
+                        result.source_name_field,
+                    ),
+                    topic_terms=topic_terms,
+                    published_at=result.published_at,
+                    source_name=result.source_name,
+                    source_notice_id=result.source_notice_id,
+                    canonical_notice_url=canonical_notice_url,
+                    content_base_url=content_base_url,
+                )
+            except GGZYSourceError as error:
+                last_detail_error = error
+                continue
+            successful_detail_requests += 1
             if topic_terms and not notice.topic_keywords:
                 continue
             if not _matches_requested_region(notice, task.regions):
@@ -804,6 +855,8 @@ class GGZYSource:
             ):
                 continue
             notices.append(notice)
+        if detail_results and successful_detail_requests == 0 and last_detail_error is not None:
+            raise last_detail_error
         return notices
 
     @staticmethod
@@ -898,14 +951,22 @@ class GGZYSource:
                 self._last_request_at = time.monotonic()
             except (TimeoutError, asyncio.TimeoutError, socket.timeout) as error:
                 if attempt < self._retries:
+                    await self._sleep(self._retry_backoff * (2**attempt))
                     continue
                 raise GGZYTimeoutError(f"request timed out: {url}") from error
             except URLError as error:
                 if isinstance(error.reason, (TimeoutError, socket.timeout)):
                     if attempt < self._retries:
+                        await self._sleep(self._retry_backoff * (2**attempt))
                         continue
                     raise GGZYTimeoutError(f"request timed out: {url}") from error
-                raise GGZYHTTPError(f"network request failed: {url}") from error
+                if attempt < self._retries:
+                    await self._sleep(self._retry_backoff * (2**attempt))
+                    continue
+                raise GGZYHTTPError(
+                    f"network request failed after {self._retries + 1} attempts: "
+                    f"{type(error.reason).__name__}: {error.reason}"
+                ) from error
 
             text = response.text()
             if _looks_restricted(response.status, text):
@@ -913,6 +974,7 @@ class GGZYSource:
                     "platform denied anonymous access or requested human verification"
                 )
             if response.status >= 500 and attempt < self._retries:
+                await self._sleep(self._retry_backoff * (2**attempt))
                 continue
             if response.status < 200 or response.status >= 300:
                 raise GGZYHTTPError(

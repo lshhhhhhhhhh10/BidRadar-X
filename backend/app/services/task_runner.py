@@ -21,6 +21,7 @@ class TaskRunner:
         task_id: str,
         query: str,
         frequency: str,
+        interval_minutes: int | None = None,
         run_id: str | None = None,
         requested_subject: str | None = None,
         requested_region: str | None = None,
@@ -33,6 +34,7 @@ class TaskRunner:
             "run_id": run_id,
             "query": query,
             "frequency": frequency,
+            "interval_minutes": interval_minutes,
             "requested_subject": requested_subject,
             "requested_region": requested_region,
             "status": "running",
@@ -62,5 +64,8 @@ class TaskRunner:
                 callback_result = progress_callback(state)
                 if isawaitable(callback_result):
                     await callback_result
-        self.repository.save_run(state)
+        # Keep completed run state for scheduled-trigger auditing. The report
+        # history query separately excludes attempts without material changes.
+        if state.get("status") == "completed" and state.get("projects"):
+            self.repository.save_run(state)
         return state

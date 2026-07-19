@@ -1,5 +1,7 @@
 # BidRadar-X 路线图与事实总表
 
+> 历史工程审计说明：本文件的大部分状态冻结于 2026-07-15，用于追溯早期能力编号和证据，不再作为当前比赛交付状态首页。当前能力、安装和验收请以 [README](../README.md)、[评委指南](JUDGE_GUIDE.md) 和 [项目上下文](PROJECT_CONTEXT.md) 为准。
+
 更新时间：2026-07-15（Asia/Shanghai）
 
 本文件是“原始产品构想—历史执行任务—正式能力编号—当前状态”的唯一总映射。未来执行顺序看 [WORK_PLAN](WORK_PLAN.md)，第一次接手看 [TEAM_HANDOFF](TEAM_HANDOFF.md)。

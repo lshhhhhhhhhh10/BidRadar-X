@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 from threading import Lock
 from typing import Callable, Iterable
@@ -15,12 +16,16 @@ from .migrations import MIGRATION_SPECS
 # The bundled Python runtime cannot reliably open SQLite files below a Windows
 # path containing non-ASCII characters. Keep simulation data in the user's
 # local temp area by default and allow an explicit ASCII path override.
-DATA_DIR = Path(
-    os.environ.get(
-        "TENDER_DATA_DIR",
-        Path(tempfile.gettempdir()) / "TenderIntelligence",
-    )
-)
+def _default_data_dir() -> Path:
+    """Keep automated tests physically isolated from the local product database."""
+
+    executable = " ".join(sys.argv).casefold()
+    is_test_process = any(marker in executable for marker in ("unittest", "pytest"))
+    folder = f"BidRadar-X-tests-{os.getpid()}" if is_test_process else "TenderIntelligence"
+    return Path(tempfile.gettempdir()) / folder
+
+
+DATA_DIR = Path(os.environ.get("TENDER_DATA_DIR", _default_data_dir()))
 DATABASE_PATH = DATA_DIR / "app.db"
 _INITIALIZE_LOCK = Lock()
 

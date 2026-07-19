@@ -159,7 +159,7 @@ class StorageMigrationTest(StorageTestCase):
                 )
             }
 
-        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         self.assertTrue(all(row["checksum"] for row in versions))
         self.assertTrue(
             {
@@ -233,7 +233,7 @@ class StorageMigrationTest(StorageTestCase):
             {"project_stable_fingerprint", "snapshot_fingerprint", "snapshot_json", "version"}
             .issubset(columns)
         )
-        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
     def test_populated_v4_database_upgrades_to_v5_without_losing_history(self) -> None:
         original_apply_migrations = database_module.apply_migrations
@@ -291,7 +291,7 @@ class StorageMigrationTest(StorageTestCase):
             ).fetchone()
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         self.assertEqual(payload_count, 1)
         self.assertEqual(attachment_version["status"], "downloaded")
         self.assertEqual(attachment_version["content_sha256"], "5" * 64)
@@ -333,7 +333,7 @@ class StorageMigrationTest(StorageTestCase):
                 ("still-usable", "旧库仍可用", "once", "2026-07-14T10:00:00+08:00"),
             )
 
-        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual([row["version"] for row in versions], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         self.assertIsNone(half_table)
 
     def test_v8_backfills_tombstones_for_previously_deleted_duplicate_runs(self) -> None:

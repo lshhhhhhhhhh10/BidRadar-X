@@ -11,7 +11,11 @@ def plan_task(state: dict[str, Any]) -> dict[str, Any]:
     monitor_plan = {
         "mode": "initial_query" if state["frequency"] == "once" else "continuous_monitoring",
         "frequency": state["frequency"],
-        "next_run_at": scheduler.next_run_at(state["frequency"]),
+        "interval_minutes": state.get("interval_minutes"),
+        "next_run_at": scheduler.next_run_at(
+            state["frequency"],
+            interval_minutes=state.get("interval_minutes"),
+        ),
         "watermark_scope": "per_source",
         "delivery_rule": "new_event_or_material_change",
     }

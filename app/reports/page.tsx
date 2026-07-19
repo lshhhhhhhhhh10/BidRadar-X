@@ -309,7 +309,7 @@ export default function ReportsPage() {
                         <li key={source.source_id} className={`is-${source.status}`}>
                           <i aria-hidden="true" />
                           <div><strong>{source.name}</strong><small>{source.requires_login ? "授权来源" : "公开来源"}</small></div>
-                          <span>{source.status === "failed" ? "抓取失败" : source.record_count > 0 ? `${source.record_count} 条原始记录` : "未抓取到内容"}</span>
+                          <span>{source.status === "failed" ? source.failure_reason || "抓取失败，未返回具体原因" : source.record_count > 0 ? `${source.record_count} 条原始记录` : "未抓取到内容"}</span>
                         </li>
                       ))}
                     </ul>
@@ -481,8 +481,20 @@ export default function ReportsPage() {
                   <p>{cleanDisplayText(activeProject.summary) || "原公告未提供可核验的核心内容。"}</p>
                 </section>
 
+                <section className="intelligence-verification-entry" aria-labelledby="verification-entry-title">
+                  <header className="title-with-info">
+                    <h3 id="verification-entry-title">结构化核验</h3>
+                    <InfoTip text="这里不是重复摘要，而是把已提取字段逐项对应到公告或附件中的原文证据；缺失项会明确标为未披露，便于投标前复核。" />
+                  </header>
+                  <dl>
+                    <div><dt>证据字段</dt><dd>{activeProject.evidence_count}</dd></div>
+                    <div><dt>条款模块</dt><dd>{activeProject.module_count ?? 0}</dd></div>
+                    <div><dt>本地附件</dt><dd>{activeProject.attachments.filter((item) => item.local_available).length}</dd></div>
+                  </dl>
+                </section>
+
                 <div className="intelligence-actions">
-                  <Link href={`/projects/${encodeURIComponent(activeProject.project_id)}?run=${encodeURIComponent(activeReport.run_id)}&task=${encodeURIComponent(activeReport.task_id)}`}>查看结构化详情</Link>
+                  <Link href={`/projects/${encodeURIComponent(activeProject.project_id)}?run=${encodeURIComponent(activeReport.run_id)}&task=${encodeURIComponent(activeReport.task_id)}`}>核验字段与原文</Link>
                   {activeProject.url && <a href={activeProject.url} target="_blank" rel="noreferrer">打开原公告 ↗</a>}
                 </div>
               </>
@@ -637,6 +649,7 @@ function formatDateTime(value: string): string {
 
 
 function frequencyLabel(value: ReportHistoryItem["frequency"]): string {
+  if (value === "interval") return "间隔更新";
   if (value === "daily") return "每日更新";
   if (value === "weekly") return "每周更新";
   return "单次查询";

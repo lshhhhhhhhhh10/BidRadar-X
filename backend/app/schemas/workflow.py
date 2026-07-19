@@ -6,6 +6,7 @@ class WorkflowState(TypedDict, total=False):
     run_id: str
     query: str
     frequency: str
+    interval_minutes: int | None
     requested_subject: str | None
     requested_region: str | None
     status: str
@@ -25,6 +26,7 @@ class WorkflowState(TypedDict, total=False):
     funnel: dict[str, int]
     quality_passed: bool
     quality_issues: list[str]
+    fact_consistency: dict[str, Any]
     retry_count: int
     ai_audit: list[dict[str, Any]]
     ai_report: dict[str, Any]

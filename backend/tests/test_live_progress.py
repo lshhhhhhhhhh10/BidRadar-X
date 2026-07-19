@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 
+from app.api.tasks import _public_live_job
 from app.services.live_progress import build_live_progress
 
 
 class LiveProgressTests(unittest.TestCase):
+    def test_empty_live_task_never_exposes_a_report_redirect(self) -> None:
+        public = _public_live_job(
+            {
+                "job_id": "job-empty",
+                "run_id": "run-empty",
+                "task_id": "task-empty",
+                "lifecycle": "empty",
+                "state": {"projects": [], "run_id": "run-empty", "task_id": "task-empty"},
+                "updated_at": datetime.now(timezone.utc),
+                "error_message": None,
+            }
+        )
+
+        self.assertIsNone(public["redirect_url"])
+
     def test_empty_search_uses_cross_states_instead_of_success(self) -> None:
         state = {
             "query": "不存在的服务器项目",
@@ -72,6 +89,8 @@ class LiveProgressTests(unittest.TestCase):
                     "prompt_id": "query-expansion",
                     "status": "failed",
                     "model": "glm-5.2",
+                    "failure_reason": "智谱账户余额不足或没有可用资源包",
+                    "provider_code": "1113",
                 },
             ],
         }
@@ -83,6 +102,10 @@ class LiveProgressTests(unittest.TestCase):
         self.assertEqual(
             progress["stages"][1]["ai"]["label"],
             "AI 未成功，已使用规则兜底",
+        )
+        self.assertEqual(
+            progress["stages"][1]["ai"]["failure_reason"],
+            "智谱账户余额不足或没有可用资源包",
         )
 
     def test_source_failure_exposes_a_safe_specific_reason(self) -> None:
@@ -106,7 +129,8 @@ class LiveProgressTests(unittest.TestCase):
         progress = build_live_progress(state, lifecycle="failed")
 
         source = progress["stages"][2]["details"]["sources"][0]
-        self.assertEqual(source["failure_reason"], "官网返回 HTTP 503，自动重试未恢复")
+        self.assertIn("官网持续返回 HTTP 503", source["failure_reason"])
+        self.assertIn("1 轮来源级尝试", source["failure_reason"])
 
 
 if __name__ == "__main__":

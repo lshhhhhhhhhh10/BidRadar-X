@@ -9,12 +9,15 @@ import { InfoTip } from "@/app/components/InfoTip";
 
 import {
   deleteReportHistory,
+  deleteSubscription,
   frequencyToApi,
   getLiveTask,
   listReports,
   listSourceCatalog,
   listSubscriptions,
   pauseLiveTask,
+  pauseSubscription,
+  resumeSubscription,
   startLiveTask,
   type LiveTask,
   type LiveTaskStage,
@@ -29,10 +32,22 @@ import {
   type FavoriteProject,
 } from "@/lib/favorite-projects";
 import {
+  FAVORITE_RECOMMENDATIONS_CHANGED_EVENT,
+  readFavoriteRecommendations,
+  removeFavoriteRecommendation,
+  toggleFavoriteRecommendation as persistFavoriteRecommendation,
+} from "@/lib/favorite-recommendations";
+import {
   INITIAL_MARKED_PROJECTS,
   markedProjectStatus,
   type MarkedProject,
 } from "@/lib/marked-projects";
+import {
+  readStarredSubscriptionIds,
+  removeStarredSubscription,
+  STARRED_SUBSCRIPTIONS_CHANGED_EVENT,
+  toggleStarredSubscription,
+} from "@/lib/starred-subscriptions";
 
 const FALLBACK_SOURCES: SourceCatalogItem[] = [
   {
@@ -47,6 +62,19 @@ const FALLBACK_SOURCES: SourceCatalogItem[] = [
     status_label: "已接入 · 可采集",
     detail: "财政部政府采购公告正式来源，已接入生产工作流。",
     collection_mode: "公开网页",
+  },
+  {
+    id: "ggzy-national",
+    name: "全国公共资源交易平台",
+    category: "government",
+    category_label: "政府 / 公共平台",
+    url: "https://www.ggzy.gov.cn/",
+    host: "ggzy.gov.cn",
+    requires_auth: false,
+    status: "ready",
+    status_label: "已接入 · 可采集",
+    detail: "已接入公告检索、详情解析和附件归档生产工作流。",
+    collection_mode: "公开检索接口 + 公告详情 + 附件",
   },
   {
     id: "cmcc-b2b",
@@ -82,10 +110,23 @@ const FALLBACK_SOURCES: SourceCatalogItem[] = [
     url: "https://ted.europa.eu/",
     host: "ted.europa.eu",
     requires_auth: false,
-    status: "ready",
-    status_label: "官方 API · 可采集",
-    detail: "欧盟出版局 Search API 支持匿名检索和公告复用。",
+    status: "restricted",
+    status_label: "待接入生产适配器",
+    detail: "已完成来源调研，但尚未注册生产适配器，不会作为已采集来源展示。",
     collection_mode: "TED Search API v3",
+  },
+  {
+    id: "sam-gov",
+    name: "SAM.gov Contract Opportunities",
+    category: "overseas",
+    category_label: "海外采购 / 招标平台",
+    url: "https://sam.gov/content/opportunities",
+    host: "sam.gov",
+    requires_auth: true,
+    status: "needs_auth",
+    status_label: "等待用户 API Key",
+    detail: "美国联邦合同机会官方来源。注册用户可在 Account Details 生成个人 API Key，并由本地后端安全调用。",
+    collection_mode: "SAM.gov Opportunities API v2",
   },
   {
     id: "ctba-news",
@@ -95,9 +136,9 @@ const FALLBACK_SOURCES: SourceCatalogItem[] = [
     url: "https://www.ctba.org.cn/",
     host: "ctba.org.cn",
     requires_auth: false,
-    status: "ready",
-    status_label: "公开资讯 · 可采集",
-    detail: "行业政策、标准及招标投标动态公开来源。",
+    status: "restricted",
+    status_label: "待接入生产适配器",
+    detail: "保留为行业资讯候选来源；尚未注册生产适配器，不会进入检索结果。",
     collection_mode: "公开资讯页",
   },
 ];
@@ -122,6 +163,10 @@ const recommendations = [
   "天津市 轨道交通维护项目",
   "云南省 文旅数字化项目",
 ];
+
+const KEYWORD_INITIAL_DELAY_MS = 520;
+const KEYWORD_REVEAL_INTERVAL_MS = 420;
+const KEYWORD_FINAL_HOLD_MS = 900;
 
 function getBeijingClock() {
   const now = new Date();
@@ -166,14 +211,19 @@ export default function Home() {
   const [historyManaging, setHistoryManaging] = useState(false);
   const [deletingRunId, setDeletingRunId] = useState("");
   const [visualStageIndex, setVisualStageIndex] = useState(0);
+  const [completedExpansionSignature, setCompletedExpansionSignature] = useState("");
   const [subscriptions, setSubscriptions] = useState<SubscriptionSummary[]>([]);
+  const [starredSubscriptionIds, setStarredSubscriptionIds] = useState<string[]>([]);
+  const [schedulesManaging, setSchedulesManaging] = useState(false);
+  const [scheduleBusyTaskId, setScheduleBusyTaskId] = useState("");
+  const [scheduleFeedback, setScheduleFeedback] = useState("");
   const [favoriteProjects, setFavoriteProjects] = useState<FavoriteProject[]>([]);
   const [favoritesManaging, setFavoritesManaging] = useState(false);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
   const [sourceName, setSourceName] = useState("信息来源网站1");
   const [sourceError, setSourceError] = useState("");
-  const [markedProjects] = useState<MarkedProject[]>(() => [
+  const [markedProjects, setMarkedProjects] = useState<MarkedProject[]>(() => [
     ...INITIAL_MARKED_PROJECTS,
   ]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -181,15 +231,29 @@ export default function Home() {
   const sourceNavigationRef = useRef<HTMLElement>(null);
   const sourceSequenceRef = useRef(1);
   const workflowCarouselRef = useRef<HTMLOListElement>(null);
-  const workflowScrollFrame = useRef<number | null>(null);
   const workflowUserUntil = useRef(0);
-  const workflowProgrammaticUntil = useRef(0);
+  const workflowVisualIndexRef = useRef(0);
+  const workflowWheelDeltaRef = useRef(0);
+  const workflowWheelLockedRef = useRef(false);
+  const workflowWheelIdleTimerRef = useRef<number | null>(null);
+  const workflowPointerRef = useRef<{ id: number; startX: number; scrollLeft: number } | null>(null);
 
   useEffect(() => {
     const updateClock = () => setClock(getBeijingClock());
     updateClock();
     const timer = window.setInterval(updateClock, 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => setStarredSubscriptionIds(readStarredSubscriptionIds());
+    refresh();
+    window.addEventListener(STARRED_SUBSCRIPTIONS_CHANGED_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(STARRED_SUBSCRIPTIONS_CHANGED_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
   }, []);
 
   useEffect(() => {
@@ -208,18 +272,23 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    listReports()
-      .then(({ items }) => {
-        if (active) setHistoryItems(items.slice(0, 12));
-      })
-      .catch(() => {
-        if (active) setHistoryItems([]);
-      })
-      .finally(() => {
-        if (active) setHistoryLoading(false);
-      });
+    const refreshReports = () => {
+      listReports()
+        .then(({ items }) => {
+          if (active) setHistoryItems(items.slice(0, 12));
+        })
+        // A transient backend or migration error must not masquerade as an
+        // empty history. Keep the last successfully loaded snapshot visible.
+        .catch(() => undefined)
+        .finally(() => {
+          if (active) setHistoryLoading(false);
+        });
+    };
+    refreshReports();
+    const timer = window.setInterval(refreshReports, 15_000);
     return () => {
       active = false;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -253,14 +322,21 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    listSubscriptions()
-      .then(({ items }) => {
-        if (active) setSubscriptions(items.filter((item) => item.status !== "completed"));
-      })
-      .catch(() => {
-        if (active) setSubscriptions([]);
-      });
-    return () => { active = false; };
+    const refreshSubscriptions = () => {
+      listSubscriptions()
+        .then(({ items }) => {
+          if (active) setSubscriptions(items.filter((item) => item.status !== "completed"));
+        })
+        // Keep the last successful schedule snapshot during a temporary API
+        // outage for the same reason as report history above.
+        .catch(() => undefined);
+    };
+    refreshSubscriptions();
+    const timer = window.setInterval(refreshSubscriptions, 15_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -274,6 +350,17 @@ export default function Home() {
     };
   }, []);
 
+  useEffect(() => {
+    const refresh = () => setFavoriteRecommendations(readFavoriteRecommendations());
+    refresh();
+    window.addEventListener(FAVORITE_RECOMMENDATIONS_CHANGED_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(FAVORITE_RECOMMENDATIONS_CHANGED_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
+
   const visibleRecommendations = useMemo(
     () =>
       Array.from(
@@ -281,6 +368,13 @@ export default function Home() {
         (_, index) => recommendations[(recommendationOffset + index) % recommendations.length],
       ),
     [recommendationOffset],
+  );
+  const displayedSubscriptions = useMemo(
+    () => [...subscriptions].sort((left, right) => (
+      Number(starredSubscriptionIds.includes(right.task_id))
+      - Number(starredSubscriptionIds.includes(left.task_id))
+    )),
+    [starredSubscriptionIds, subscriptions],
   );
   const readySourceCount = sourceWebsites.filter((source) => source.status === "ready").length;
   const sourceCategoryCount = new Set(sourceWebsites.map((source) => source.category)).size;
@@ -293,9 +387,7 @@ export default function Home() {
   }
 
   function toggleFavoriteRecommendation(item: string) {
-    setFavoriteRecommendations((current) =>
-      current.includes(item) ? current.filter((value) => value !== item) : [item, ...current],
-    );
+    setFavoriteRecommendations(persistFavoriteRecommendation(item));
   }
 
   function addSourceWebsite(event: React.FormEvent<HTMLFormElement>) {
@@ -416,6 +508,39 @@ export default function Home() {
     }
   }
 
+  async function toggleSubscription(item: SubscriptionSummary) {
+    setScheduleBusyTaskId(item.task_id);
+    setScheduleFeedback("");
+    try {
+      const updated = item.status === "active"
+        ? await pauseSubscription(item.task_id)
+        : await resumeSubscription(item.task_id);
+      setSubscriptions((current) => current.map((candidate) => (
+        candidate.task_id === updated.task_id ? updated : candidate
+      )));
+      setScheduleFeedback(updated.status === "active" ? "定时任务已恢复" : "定时任务已暂停");
+    } catch (reason) {
+      setScheduleFeedback(reason instanceof Error ? reason.message : "定时任务状态修改失败");
+    } finally {
+      setScheduleBusyTaskId("");
+    }
+  }
+
+  async function removeSubscription(item: SubscriptionSummary) {
+    setScheduleBusyTaskId(item.task_id);
+    setScheduleFeedback("");
+    try {
+      await deleteSubscription(item.task_id);
+      setSubscriptions((current) => current.filter((candidate) => candidate.task_id !== item.task_id));
+      setStarredSubscriptionIds(removeStarredSubscription(item.task_id));
+      setScheduleFeedback("定时任务已删除");
+    } catch (reason) {
+      setScheduleFeedback(reason instanceof Error ? reason.message : "定时任务删除失败");
+    } finally {
+      setScheduleBusyTaskId("");
+    }
+  }
+
   const displayedStages = liveTask?.stages ?? pendingStages();
   const activeStageIndex = displayedStages.findIndex(
     (stage) => stage.status === "running" || stage.status === "error",
@@ -429,46 +554,157 @@ export default function Home() {
         0,
       ),
     );
+  const expansionStage = displayedStages.find((stage) => stage.id === "expansion");
+  const expansionWords = expansionStage?.details.added_keywords ?? [];
+  const expansionSignature = liveTask && expansionWords.length > 0
+    ? `${liveTask.job_id}:${expansionWords.join("\u0000")}`
+    : "";
+  const expansionPlaybackPending = Boolean(
+    expansionSignature && expansionSignature !== completedExpansionSignature,
+  );
 
   useEffect(() => {
-    if (Date.now() < workflowUserUntil.current) return;
-    setVisualStageIndex(furthestReadyStage);
-  }, [furthestReadyStage]);
+    if (!expansionSignature) return;
+    workflowUserUntil.current = 0;
+    const focusTimer = window.setTimeout(() => setVisualStageIndex(1), 0);
+    const playbackDuration = KEYWORD_INITIAL_DELAY_MS
+      + expansionWords.length * KEYWORD_REVEAL_INTERVAL_MS
+      + KEYWORD_FINAL_HOLD_MS;
+    const timer = window.setTimeout(() => {
+      workflowUserUntil.current = 0;
+      setCompletedExpansionSignature(expansionSignature);
+    }, playbackDuration);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.clearTimeout(timer);
+    };
+  }, [expansionSignature, expansionWords.length]);
 
   useEffect(() => {
-    const target = workflowCarouselRef.current?.querySelector<HTMLElement>(
-      `[data-stage-index="${visualStageIndex}"]`,
-    );
-    workflowProgrammaticUntil.current = Date.now() + 800;
-    target?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+    const timer = window.setTimeout(() => {
+      if (expansionPlaybackPending) {
+        setVisualStageIndex(1);
+        return;
+      }
+      if (Date.now() < workflowUserUntil.current) return;
+      setVisualStageIndex(furthestReadyStage);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [expansionPlaybackPending, furthestReadyStage]);
+
+  useEffect(() => {
+    workflowVisualIndexRef.current = visualStageIndex;
+    centerWorkflowStage(visualStageIndex);
   }, [visualStageIndex]);
+
+  useEffect(() => {
+    const carousel = workflowCarouselRef.current;
+    if (!carousel) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.ctrlKey) return;
+      event.preventDefault();
+      markWorkflowInteraction();
+
+      const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+      workflowWheelDeltaRef.current += delta;
+      if (workflowWheelIdleTimerRef.current !== null) {
+        window.clearTimeout(workflowWheelIdleTimerRef.current);
+      }
+      workflowWheelIdleTimerRef.current = window.setTimeout(() => {
+        workflowWheelLockedRef.current = false;
+        workflowWheelDeltaRef.current = 0;
+        workflowWheelIdleTimerRef.current = null;
+      }, 220);
+
+      if (workflowWheelLockedRef.current || Math.abs(workflowWheelDeltaRef.current) < 8) return;
+      workflowWheelLockedRef.current = true;
+      const direction = workflowWheelDeltaRef.current > 0 ? 1 : -1;
+      setVisualStageIndex((current) => {
+        const next = Math.max(0, Math.min(displayedStages.length - 1, current + direction));
+        workflowVisualIndexRef.current = next;
+        if (next === current) window.requestAnimationFrame(() => centerWorkflowStage(current));
+        return next;
+      });
+    };
+
+    carousel.addEventListener("wheel", handleWheel, { passive: false });
+    return () => {
+      carousel.removeEventListener("wheel", handleWheel);
+      if (workflowWheelIdleTimerRef.current !== null) {
+        window.clearTimeout(workflowWheelIdleTimerRef.current);
+        workflowWheelIdleTimerRef.current = null;
+      }
+      workflowWheelLockedRef.current = false;
+      workflowWheelDeltaRef.current = 0;
+    };
+  }, [displayedStages.length]);
 
   function markWorkflowInteraction() {
     workflowUserUntil.current = Date.now() + 3500;
   }
 
-  function syncWorkflowFocus() {
+  function centerWorkflowStage(index: number, behavior?: ScrollBehavior) {
     const carousel = workflowCarouselRef.current;
-    if (
-      !carousel
-      || workflowScrollFrame.current !== null
-      || Date.now() < workflowProgrammaticUntil.current
-    ) return;
-    workflowScrollFrame.current = window.requestAnimationFrame(() => {
-      workflowScrollFrame.current = null;
-      const center = carousel.getBoundingClientRect().left + carousel.clientWidth / 2;
-      const items = Array.from(carousel.querySelectorAll<HTMLElement>("[data-stage-index]"));
-      const nearest = items.reduce<{ index: number; distance: number }>(
-        (current, item) => {
-          const rect = item.getBoundingClientRect();
-          const distance = Math.abs(rect.left + rect.width / 2 - center);
-          const index = Number(item.dataset.stageIndex || 0);
-          return distance < current.distance ? { index, distance } : current;
-        },
-        { index: visualStageIndex, distance: Number.POSITIVE_INFINITY },
-      );
-      setVisualStageIndex(nearest.index);
+    const target = carousel?.querySelector<HTMLElement>(`[data-stage-index="${index}"]`);
+    if (!carousel || !target) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const left = target.offsetLeft - (carousel.clientWidth - target.offsetWidth) / 2;
+    carousel.scrollTo({ left, behavior: behavior ?? (reducedMotion ? "auto" : "smooth") });
+  }
+
+  function moveWorkflowStage(direction: -1 | 1) {
+    markWorkflowInteraction();
+    setVisualStageIndex((current) => {
+      const next = Math.max(0, Math.min(displayedStages.length - 1, current + direction));
+      workflowVisualIndexRef.current = next;
+      if (next === current) window.requestAnimationFrame(() => centerWorkflowStage(current));
+      return next;
     });
+  }
+
+  function handleWorkflowPointerDown(event: React.PointerEvent<HTMLOListElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    markWorkflowInteraction();
+    workflowPointerRef.current = {
+      id: event.pointerId,
+      startX: event.clientX,
+      scrollLeft: event.currentTarget.scrollLeft,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handleWorkflowPointerMove(event: React.PointerEvent<HTMLOListElement>) {
+    const pointer = workflowPointerRef.current;
+    if (!pointer || pointer.id !== event.pointerId) return;
+    const distance = event.clientX - pointer.startX;
+    if (Math.abs(distance) > 3) event.preventDefault();
+    event.currentTarget.scrollLeft = pointer.scrollLeft - distance * 0.34;
+  }
+
+  function finishWorkflowPointer(event: React.PointerEvent<HTMLOListElement>) {
+    const pointer = workflowPointerRef.current;
+    if (!pointer || pointer.id !== event.pointerId) return;
+    const distance = event.clientX - pointer.startX;
+    workflowPointerRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (Math.abs(distance) >= 42) moveWorkflowStage(distance < 0 ? 1 : -1);
+    else centerWorkflowStage(workflowVisualIndexRef.current);
+  }
+
+  function cancelWorkflowPointer(event: React.PointerEvent<HTMLOListElement>) {
+    const pointer = workflowPointerRef.current;
+    if (!pointer || pointer.id !== event.pointerId) return;
+    workflowPointerRef.current = null;
+    centerWorkflowStage(workflowVisualIndexRef.current);
+  }
+
+  function handleWorkflowKeyDown(event: React.KeyboardEvent<HTMLOListElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    moveWorkflowStage(event.key === "ArrowRight" ? 1 : -1);
   }
 
   return (
@@ -570,30 +806,42 @@ export default function Home() {
 
           {(collecting || liveTask) ? (
             <section className="automation-progress" role="status" aria-live="polite" aria-label="自动检索进度">
-              <ol ref={workflowCarouselRef} onScroll={syncWorkflowFocus} onPointerDown={markWorkflowInteraction} onTouchStart={markWorkflowInteraction} onWheel={markWorkflowInteraction}>
+              <ol
+                ref={workflowCarouselRef}
+                tabIndex={0}
+                aria-label={`检索链路，第 ${visualStageIndex + 1} 步，共 ${displayedStages.length} 步`}
+                onKeyDown={handleWorkflowKeyDown}
+                onPointerDown={handleWorkflowPointerDown}
+                onPointerMove={handleWorkflowPointerMove}
+                onPointerUp={finishWorkflowPointer}
+                onPointerCancel={cancelWorkflowPointer}
+              >
                 {displayedStages.map((stage, index) => {
                   const distance = Math.abs(index - visualStageIndex);
                   return (
                   <li
-                    className={`workflow-stage is-${stage.status} ${index === visualStageIndex ? "is-focus" : `is-distance-${Math.min(distance, 3)}`}`}
+                    className={`workflow-stage-slot ${index === visualStageIndex ? "is-focus" : `is-distance-${Math.min(distance, 3)}`}`}
                     key={stage.id}
                     data-stage-index={index}
                   >
-                    <span className="automation-step-marker" aria-label={stageStatusLabel(stage.status)}>
-                      {stage.status === "success" ? "✓" : stage.status === "empty" || stage.status === "error" ? "×" : stage.number}
-                    </span>
-                    <div className="workflow-stage-copy">
-                      <strong>{stage.title}</strong>
-                      <small>{stage.summary}</small>
-                      {index === visualStageIndex && <StageDetails stage={stage} />}
-                      {stage.ai.status !== "pending" && (
-                        <span className={`workflow-ai-proof is-${stage.ai.status}`}>
-                          {stage.ai.label}
-                          {stage.ai.model ? ` · ${stage.ai.model}` : ""}
-                          {stage.ai.latency_ms ? ` · ${(stage.ai.latency_ms / 1000).toFixed(1)}s` : ""}
-                        </span>
-                      )}
-                    </div>
+                    <article className={`workflow-stage is-${stage.status} ${index === visualStageIndex ? "is-focus" : `is-distance-${Math.min(distance, 3)}`}`}>
+                      <span className="automation-step-marker" aria-label={stageStatusLabel(stage.status)}>
+                        {stage.status === "success" ? "✓" : stage.status === "empty" || stage.status === "error" ? "×" : stage.number}
+                      </span>
+                      <div className="workflow-stage-copy">
+                        <strong>{stage.title}</strong>
+                        <small>{stage.summary}</small>
+                        {index === visualStageIndex && <StageDetails stage={stage} />}
+                        {stage.ai.status !== "pending" && (
+                          <span className={`workflow-ai-proof is-${stage.ai.status}`}>
+                            {stage.ai.label}
+                            {stage.ai.model ? ` · ${stage.ai.model}` : ""}
+                            {stage.ai.latency_ms ? ` · ${(stage.ai.latency_ms / 1000).toFixed(1)}s` : ""}
+                            {stage.ai.failure_reason ? ` · ${stage.ai.failure_reason}` : ""}
+                          </span>
+                        )}
+                      </div>
+                    </article>
                   </li>
                   );
                 })}
@@ -619,20 +867,33 @@ export default function Home() {
 
         <aside className="result-inspector workbench-right-rail" aria-label="定时推送与收藏项目">
           <section className="scheduled-push-panel">
-            <header><span className="title-with-info"><h2>定时推送</h2><InfoTip text="这里集中展示已启用的每日或每周自动检索任务，以及内置演示任务。" /></span><div className="rail-header-actions"><span className="library-count">{subscriptions.length + markedProjects.length}</span></div></header>
+            <header><span className="title-with-info"><h2>定时推送</h2><InfoTip text="任务会按北京时间持久化触发；管理模式可暂停、恢复或删除。" /></span><div className="rail-header-actions"><span className="library-count">{subscriptions.length + markedProjects.length}</span><button className={schedulesManaging ? "history-manage-button is-active" : "history-manage-button"} type="button" onClick={() => setSchedulesManaging((current) => !current)}>{schedulesManaging ? "完成" : "管理"}</button></div></header>
             <div className="scheduled-push-list">
-              {subscriptions.map((item) => (
-                <article key={item.task_id}>
-                  <span>{frequencyDisplay(item.frequency)} · {item.local_time}</span>
-                  <strong>{summarizeSubscription(item.query)}</strong>
-                  <small>{item.status === "active" ? `下次 ${formatCompactDateTime(item.next_run_at)}` : "已暂停"}</small>
+              {displayedSubscriptions.map((item) => (
+                <article className={`${item.status === "failed" ? "is-failed" : item.status === "paused" ? "is-paused" : ""} ${starredSubscriptionIds.includes(item.task_id) ? "is-starred" : ""}`.trim()} key={item.task_id}>
+                  <button
+                    className={`scheduled-star-button ${starredSubscriptionIds.includes(item.task_id) ? "is-starred" : ""}`}
+                    type="button"
+                    aria-label={starredSubscriptionIds.includes(item.task_id) ? `取消星标${summarizeSubscription(item.query)}` : `星标${summarizeSubscription(item.query)}`}
+                    aria-pressed={starredSubscriptionIds.includes(item.task_id)}
+                    onClick={() => setStarredSubscriptionIds(toggleStarredSubscription(item.task_id))}
+                  >
+                    {starredSubscriptionIds.includes(item.task_id) ? "★" : "☆"}
+                  </button>
+                  <button className="scheduled-card-main" type="button" onClick={() => router.push(`/subscriptions/${encodeURIComponent(item.task_id)}`)}>
+                    <span>{frequencyDisplay(item.frequency, item.interval_minutes)}{item.frequency === "interval" ? "" : ` · ${item.local_time}`}</span>
+                    <strong>{summarizeSubscription(item.query)}</strong>
+                    <small>{item.status === "active" ? `下次 ${formatCompactDateTime(item.next_run_at)}` : item.status === "failed" ? `执行失败 · ${item.last_error || "可在管理中恢复重试"}` : "已暂停"}</small>
+                  </button>
+                  {schedulesManaging && <div className="scheduled-card-actions"><button type="button" disabled={scheduleBusyTaskId === item.task_id} onClick={() => toggleSubscription(item)}>{item.status === "active" ? "暂停" : "恢复"}</button><button className="is-danger" type="button" disabled={scheduleBusyTaskId === item.task_id} onClick={() => removeSubscription(item)}>删除</button></div>}
                 </article>
               ))}
               {markedProjects.map((project) => (
-                <button type="button" key={project.id} onClick={() => openMarkedProject(project)}><span>{project.region} · {project.frequency}</span><strong>{project.title}</strong><small>{markedProjectStatus(project)}</small></button>
+                <div className="scheduled-demo-card" key={project.id}><button type="button" onClick={() => openMarkedProject(project)}><span>{project.region} · {project.frequency}</span><strong>{project.title}</strong><small>{markedProjectStatus(project)}</small></button>{schedulesManaging && <button className="scheduled-demo-remove" type="button" onClick={() => setMarkedProjects((current) => current.filter((item) => item.id !== project.id))} aria-label={`移除${project.title}`}>×</button>}</div>
               ))}
               {!subscriptions.length && !markedProjects.length && <p className="rail-empty">暂无定时任务。</p>}
             </div>
+            {scheduleFeedback && <p className="scheduled-feedback" role="status">{scheduleFeedback}</p>}
           </section>
           <section className="saved-projects-panel">
             <header>
@@ -650,7 +911,7 @@ export default function Home() {
                 </div>
               ))}
               {favoriteRecommendations.map((item) => (
-                <div className="saved-project-card" key={item}><button type="button" onClick={() => chooseRecommendation(item)}><span>收藏检索</span><strong>{item}</strong><small>点击带回检索条件</small></button>{favoritesManaging && <button className="favorite-remove-button" type="button" onClick={() => setFavoriteRecommendations((current) => current.filter((value) => value !== item))} aria-label={`取消收藏${item}`}>×</button>}</div>
+                <div className="saved-project-card" key={item}><button type="button" onClick={() => chooseRecommendation(item)}><span>收藏检索</span><strong>{item}</strong><small>点击带回检索条件</small></button>{favoritesManaging && <button className="favorite-remove-button" type="button" onClick={() => setFavoriteRecommendations(removeFavoriteRecommendation(item))} aria-label={`取消收藏${item}`}>×</button>}</div>
               ))}
               {!favoriteProjects.length && !favoriteRecommendations.length && <p className="rail-empty">暂无收藏项目</p>}
             </div>
@@ -723,9 +984,9 @@ function StageDetails({ stage }: { stage: LiveTaskStage }) {
   return (
     <div className="workflow-stage-details">
       {details.fields && <dl>{details.fields.map((field) => <div key={field.label}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}</dl>}
-      {details.added_keywords && details.added_keywords.length > 0 && <KeywordTypewriter words={details.added_keywords} />}
+      {details.added_keywords && details.added_keywords.length > 0 && <KeywordTypewriter key={details.added_keywords.join("\u0000")} words={details.added_keywords} />}
       {details.search_phrases && details.search_phrases.length > 0 && <div className="workflow-phrases"><span>检索组合</span>{details.search_phrases.slice(0, 4).map((phrase) => <p key={phrase}>{phrase}</p>)}</div>}
-      {details.sources && details.sources.length > 0 && <ul className="workflow-source-results">{details.sources.map((source) => <li key={source.source_id}><i className={`is-${source.status}`} /><strong>{source.name}</strong><span>{source.status === "failed" ? source.failure_reason || "抓取失败" : source.status === "empty" ? "未找到相关内容" : source.relevant_count !== null ? `${source.relevant_count} 条相关` : `${source.collected_count} 条候选`}</span></li>)}</ul>}
+      {details.sources && details.sources.length > 0 && <ul className="workflow-source-results">{details.sources.map((source) => <li className={`is-${source.status}`} key={source.source_id}><i className={`is-${source.status}`} /><strong>{source.name}</strong><span>{source.status === "failed" ? source.failure_reason || "抓取失败" : source.status === "empty" ? "未找到相关内容" : source.relevant_count !== null ? `${source.relevant_count} 条相关` : `${source.collected_count} 条候选`}</span></li>)}</ul>}
       {details.counts && <dl className="workflow-counts">{details.counts.map((count) => <div key={count.label}><dt>{count.label}</dt><dd>{count.value}</dd></div>)}</dl>}
     </div>
   );
@@ -736,16 +997,23 @@ function KeywordTypewriter({ words }: { words: string[] }) {
   const [visibleCount, setVisibleCount] = useState(0);
   const signature = words.join("\u0000");
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setVisibleCount((current) => {
-        if (current >= words.length) {
-          window.clearInterval(timer);
-          return current;
-        }
-        return current + 1;
-      });
-    }, 260);
-    return () => window.clearInterval(timer);
+    let interval: number | null = null;
+    const initial = window.setTimeout(() => {
+      setVisibleCount(1);
+      interval = window.setInterval(() => {
+        setVisibleCount((current) => {
+          if (current >= words.length) {
+            if (interval !== null) window.clearInterval(interval);
+            return current;
+          }
+          return current + 1;
+        });
+      }, KEYWORD_REVEAL_INTERVAL_MS);
+    }, KEYWORD_INITIAL_DELAY_MS);
+    return () => {
+      window.clearTimeout(initial);
+      if (interval !== null) window.clearInterval(interval);
+    };
   }, [signature, words.length]);
   return (
     <div className="workflow-keywords" aria-live="polite">
@@ -761,18 +1029,20 @@ function stageStatusLabel(status: LiveTaskStage["status"]): string {
 }
 
 
-function frequencyDisplay(value: SubscriptionSummary["frequency"]): string {
+function frequencyDisplay(value: SubscriptionSummary["frequency"], intervalMinutes?: number | null): string {
+  if (value === "interval") return `每 ${intervalMinutes || 3} 分钟`;
   return value === "daily" ? "每日" : value === "weekly" ? "每周" : "单次";
 }
 
 
 function summarizeSubscription(value: string): string {
-  const cleaned = value.replace(/[，,]?每(天|日|周).*/, "").replace(/^(?:请|帮我|请帮我)+/, "").trim();
+  const cleaned = value.replace(/[，,]?(?:每(?:天|日|周)|每隔?\s*[一二两三四五六七八九十\d]+\s*分(?:钟)?).*/, "").replace(/^(?:请|帮我|请帮我)+/, "").trim();
   return cleaned.length > 28 ? `${cleaned.slice(0, 28)}…` : cleaned || "定时招投标检索";
 }
 
 
-function formatCompactDateTime(value: string): string {
+function formatCompactDateTime(value: string | null): string {
+  if (!value) return "等待重新排期";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);

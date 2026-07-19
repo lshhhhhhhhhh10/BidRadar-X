@@ -5,7 +5,7 @@ from typing import Any, TypeVar, cast
 from pydantic import BaseModel
 
 from .client import AIResult, StructuredAIClient
-from .config import AISettings
+from .config import aggregate_status
 from .prompts import (
     DEDUP_PROMPT,
     INTENT_PROMPT,
@@ -38,11 +38,11 @@ class AICoordinator:
 
     @property
     def enabled(self) -> bool:
-        return self.client.settings.enabled
+        return bool(self.client.settings_candidates)
 
     @staticmethod
     def status() -> dict[str, object]:
-        return AISettings.load().public_status()
+        return aggregate_status()
 
     def _run(
         self,

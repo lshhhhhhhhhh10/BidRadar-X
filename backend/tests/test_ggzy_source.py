@@ -9,6 +9,7 @@ from app.sources.ggzy import (
     GGZYSource,
     GGZYStructureChangedError,
     GGZYTimeoutError,
+    _find_embedded_notice_url,
     parse_search_response,
 )
 
@@ -17,6 +18,23 @@ FIXTURES = Path(__file__).parent / "fixtures" / "ggzy"
 
 
 class GGZYDetailParserTest(unittest.TestCase):
+    def test_finds_current_inner_notice_url_from_show_detail(self) -> None:
+        outer = """
+        <a onclick="showDetail(this, '0201',
+        '/information/deal/html/b/440000/0201/20260710/correction.html')">更正</a>
+        <a onclick="showDetail(this, '0201',
+        '/information/deal/html/b/440000/0201/20260618/current123.html')">当前公告</a>
+        """
+        resolved = _find_embedded_notice_url(
+            outer,
+            "https://www.ggzy.gov.cn/information/deal/html/a/440000/0201/20260618/current123.html",
+            "current123",
+        )
+        self.assertEqual(
+            resolved,
+            "https://www.ggzy.gov.cn/information/deal/html/b/440000/0201/20260618/current123.html",
+        )
+
     def test_parses_public_detail_fixture_into_tender_notice(self) -> None:
         fetched_at = datetime.fromisoformat("2026-07-14T12:30:00+08:00")
         source = GGZYSource(now=lambda: fetched_at)
